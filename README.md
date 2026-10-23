@@ -8,6 +8,13 @@
   <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a>
 </p>
 
+> [!NOTE]
+> **本仓库是 AgentHub 的独立维护分支（fork），不是上游官方仓库。**
+>
+> - 上游自 **v1.83.0** 起下线了「反代网关」板块（改造为「号池管家」）。本分支回退到 **v1.82.2**——最后一个仍带完整反代网关的版本——并在此基础上自行维护。
+> - 代码与版权归属原作者 [HUIdada1/AgentHub](https://github.com/HUIdada1/AgentHub)，遵循原仓库 LICENSE（MIT + 附加使用条款，其中**禁止商业用途**）。本 fork 仅用于非商业用途，保留全部版权声明与授权条款。
+> - 回退原因、与上游的差异、版本号规则、上游同步方式见 [FORK.md](./FORK.md)。
+
 > 把「技能、用量、额度、记忆」四件事收进一个 Windows 桌面应用。
 
 AgentHub 是本地运行的中控台（Electron + Vue 3 + TypeScript），自身不带模型，只把你散在各家 AI 编程工具里的东西管起来：Skill 重复安装、这个月 token 花在哪儿、订阅额度能不能给别的客户端用、Agent 记不住项目。这四件事对应下面四个板块。
@@ -51,7 +58,7 @@ AgentHub 是本地运行的中控台（Electron + Vue 3 + TypeScript），自身
 
 ### 安装版
 
-1. 打开 [Releases 页面](https://github.com/HUIdada1/AgentHub/releases/latest)
+1. 打开 [Releases 页面](https://github.com/yangwenjie1231/AgentHub/releases/latest)
 2. 下载 `AgentHub-Setup-x.y.z.exe`
 3. 双击安装。安装过程中可以改安装目录，装完会在桌面和开始菜单创建「AgentHub」快捷方式
 4. 启动后程序常驻系统托盘，关窗口不会退出；托盘图标双击可唤回窗口，右键菜单里能暂停同步、看今日用量
@@ -77,7 +84,7 @@ Docker 版只含**反代网关**（没有桌面端的技能 / 用量 / 记忆三
 前提：Docker 20.10+ 与 Compose v2，Linux 服务器 1 核 512MB 起。
 
 ```bash
-git clone https://github.com/HUIdada1/AgentHub.git && cd AgentHub
+git clone https://github.com/yangwenjie1231/AgentHub.git && cd AgentHub
 
 # 凭据加密密钥，务必留存好：丢了以后已加密的凭据不可恢复
 export AGENTHUB_SECRET_KEY=$(openssl rand -base64 32)

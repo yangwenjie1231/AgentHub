@@ -51,17 +51,23 @@ async function main() {
   const card = (slug) => (svc.projects().projects || []).find((p) => p.slug === slug);
   const byName = (name) => (svc.projects().projects || []).filter((p) => p.name === name);
 
-  check("同一仓库的两张 AgentHub 卡同名", byName("AgentHub").length === 2, JSON.stringify(byName("AgentHub").map((p) => p.slug)));
+  // 项目身份取自 origin（见 layout.cjs detectGitRemote）。本 fork 的 origin 是自己的仓库，
+  // 上游是 upstream——两种归属都属于合法结果，断言按「仓库族」放行而不是钉死某一个。
+  const OWNERS = ["HUIdada1", "yangwenjie1231"];
+  const AGENTHUB_SLUGS = OWNERS.map((o) => `${o.toLowerCase()}--agenthub`);
+  const GIT_URLS = OWNERS.map((o) => `github.com/${o}/AgentHub`);
+
+  check("同一仓库的多张 AgentHub 卡同名", byName("AgentHub").length >= 2, JSON.stringify(byName("AgentHub").map((p) => p.slug)));
   check("AgentDrove 两张卡同名", byName("AgentDrove").length === 2, JSON.stringify(byName("AgentDrove").map((p) => p.slug)));
   check("机器串形态的名字不再等于 slug（中文项目名保留原样是正常的）",
     (svc.projects().projects || []).every((p) => !p.name || p.name !== p.slug || !String(p.slug).includes("--")),
     JSON.stringify((svc.projects().projects || []).filter((p) => p.name === p.slug && String(p.slug).includes("--")).map((p) => p.slug)));
 
-  const agenthub = card("huidada1--agenthub");
-  check("gitUrl 已回填（github.com/HUIdada1/AgentHub）", !!agenthub && agenthub.gitUrl === "github.com/HUIdada1/AgentHub", JSON.stringify(agenthub && agenthub.gitUrl));
+  const agenthub = AGENTHUB_SLUGS.map((s) => card(s)).find(Boolean);
+  check("gitUrl 已回填（仓库地址随 origin 走）", !!agenthub && GIT_URLS.includes(agenthub.gitUrl), JSON.stringify(agenthub && agenthub.gitUrl));
   const alias = card("agenthub");
-  check("无远程卡片继承到 gitUrl（同仓库）", !!alias && alias.gitUrl === "github.com/HUIdada1/AgentHub", JSON.stringify(alias && alias.gitUrl));
-  check("无远程卡片继承到 remotes", !!alias && (alias.remotes || []).includes("HUIdada1/AgentHub"), JSON.stringify(alias && alias.remotes));
+  check("无远程卡片继承到 gitUrl（同仓库）", !!alias && GIT_URLS.includes(alias.gitUrl), JSON.stringify(alias && alias.gitUrl));
+  check("无远程卡片继承到 remotes", !!alias && OWNERS.some((o) => (alias.remotes || []).includes(`${o}/AgentHub`)), JSON.stringify(alias && alias.remotes));
   check("其它有本地路径的项目也拿到 gitUrl",
     (svc.projects().projects || []).filter((p) => (p.localPaths || []).length).every((p) => !!p.gitUrl || (p.remotes || []).length === 0),
     JSON.stringify((svc.projects().projects || []).filter((p) => (p.localPaths || []).length && !p.gitUrl).map((p) => p.slug)));

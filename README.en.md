@@ -8,6 +8,13 @@
   <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a>
 </p>
 
+> [!NOTE]
+> **This repository is an independently maintained fork of AgentHub — not the upstream official repository.**
+>
+> - Upstream removed the **reverse proxy gateway** section starting with **v1.83.0** (repurposed into "account pool manager"). This branch is rolled back to **v1.82.2**, the last version that still ships the complete gateway, and is maintained from there.
+> - Code and copyright remain with the original author, [HUIdada1/AgentHub](https://github.com/HUIdada1/AgentHub), under the original LICENSE (MIT + additional terms, including a **non-commercial use** requirement). This fork is non-commercial only; all copyright notices and license terms are retained.
+> - Rationale, differences from upstream, versioning rules and upstream-sync workflow: see [FORK.md](./FORK.md).
+
 > Four things — skills, usage, quota and memory — pulled into one Windows desktop app.
 
 AgentHub is a locally-run control center (Electron + Vue 3 + TypeScript). It ships no model of its own; it simply takes what is scattered across your AI coding tools and puts it under one roof: duplicate skill installs, where this month's tokens actually went, whether your subscription quota can be used by other clients, and agents that never remember your project. Those four problems map to the four sections below.
@@ -51,7 +58,7 @@ Full details are in [SPONSOR.md](./SPONSOR.md).
 
 ### Installer
 
-1. Open the [Releases page](https://github.com/HUIdada1/AgentHub/releases/latest)
+1. Open the [Releases page](https://github.com/yangwenjie1231/AgentHub/releases/latest)
 2. Download `AgentHub-Setup-x.y.z.exe`
 3. Double-click to install. You can change the install directory; the installer creates an "AgentHub" shortcut on the desktop and in the Start menu
 4. After launch the app stays in the system tray — closing the window does not exit. Double-click the tray icon to bring the window back; the right-click menu lets you pause sync and check today's usage
@@ -77,7 +84,7 @@ The Docker image contains **only the proxy gateway** (no skills / usage / memory
 Prerequisites: Docker 20.10+ with Compose v2, a Linux server with 1 core and 512 MB RAM to start.
 
 ```bash
-git clone https://github.com/HUIdada1/AgentHub.git && cd AgentHub
+git clone https://github.com/yangwenjie1231/AgentHub.git && cd AgentHub
 
 # Credential encryption key — keep it safe: once lost, encrypted credentials cannot be recovered
 export AGENTHUB_SECRET_KEY=$(openssl rand -base64 32)

@@ -16,8 +16,8 @@
 import { isElectron, openExternalUrl } from "../../api/ipc";
 import { toast } from "../../utils/toast";
 
-/** 仓库固定入口：三个表单模板都在 .github/ISSUE_TEMPLATE 下 */
-const REPO = "https://github.com/HUIdada1/AgentHub";
+/** 仓库固定入口：三个表单模板都在 .github/ISSUE_TEMPLATE 下（本 fork 的仓库） */
+const REPO = "https://github.com/yangwenjie1231/AgentHub";
 
 interface Entry {
   key: string;

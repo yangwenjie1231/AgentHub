@@ -17,7 +17,10 @@ const path = require("node:path");
 const { app, BrowserWindow, Notification, nativeImage, shell, net, session } = require("electron");
 const config = require("./config.cjs");
 
-const GITHUB_REPO_URL = "https://github.com/HUIdada1/AgentHub";
+// 本 fork 的更新源指向自己的仓库，不是上游。
+// 上游 v1.83.0 起下线了反代网关，若更新源仍指向上游，客户端会把本 fork
+// 「更新」成没有反代网关的上游版本——功能被静默抹掉且无法回退。
+const GITHUB_REPO_URL = "https://github.com/yangwenjie1231/AgentHub";
 const GITHUB_RELEASES_URL = GITHUB_REPO_URL + "/releases";
 // latest.yml 在每个 Release 里都有，latest 直链永远指最新版，不用调 API 也不用担心限流
 const LATEST_YML_URL = GITHUB_RELEASES_URL + "/latest/download/latest.yml";

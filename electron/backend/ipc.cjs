@@ -157,7 +157,9 @@ function register(ctx) {
   // 注入也打不开任意地址，白名单比「只校验 http(s)」更难被滥用。
   ipcMain.handle("open_external_url", handle(async ({ url } = {}) => {
     const target = String(url || "");
-    const allow = /^https:\/\/github\.com\/HUIdada1\/AgentHub(\/|$|\?)/i.test(target);
+    // 本 fork 仓库与上游仓库都在白名单里：反馈入口指向本 fork，
+    // 但「上游 / 致谢 / 授权」类链接仍需能打开上游地址。
+    const allow = /^https:\/\/github\.com\/(yangwenjie1231|HUIdada1)\/AgentHub(\/|$|\?)/i.test(target);
     if (!allow) return { ok: false, message: "只允许打开本项目仓库的链接" };
     await shell.openExternal(target);
     return { ok: true };
