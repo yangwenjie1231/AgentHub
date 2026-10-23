@@ -78,6 +78,9 @@ jobs:
           run_sbx tools/proxy-wb-conversation-ids-selftest.cjs
           # 客户端版本自检（官方更新接口）+ 出站头完整性（对照官方抓包）
           run_sbx tools/proxy-client-version-selftest.cjs
+          # WorkBuddy 对话链路端到端（改写→出站→SSE解析→事件；保活绕过 rewriteBody，
+          # 这条是「网关能用」的唯一护栏）
+          run_sbx tools/proxy-wb-chat-e2e-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest
