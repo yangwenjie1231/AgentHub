@@ -1712,7 +1712,12 @@ function makeWorkBuddy(channelId) {
       throw new Error(`额度查询失败：${lastErr || "上游无可用响应"}`);
     },
 
-    /** 计费域 JSON 请求：paths 候选依次尝试（非 v2 优先、/v2 兜底），401 先换 token 再试一次 */
+    /** 计费域 JSON 请求：paths 候选依次尝试，**404/405（路径不存在）换下一候选**，
+     *  401 先换 token 再试一次。
+     *  ⚠ 早先实现是「拿到第一个响应就返回」，不判状态码——于是路径候选表里
+     *  排在前面但已被上游下线的路径（实测：`/report` 已 404，而 `/v2/report` 活着）
+     *  会把后续候选全部饿死，上报类动作恒定 404。对齐 chat() 的降级口径：
+     *  只有 404/405 才换下一候选，其余（400/401/5xx）如实上抛，不掩盖真实错误。 */
     async billingCall(account, secrets, paths, body) {
       const c = this.cfg();
       const bases = [];
@@ -1721,6 +1726,7 @@ function makeWorkBuddy(channelId) {
         if (s && !bases.includes(s)) bases.push(s);
       }
       let creds = secrets;
+      let lastNotFound = null;
       for (let pass = 0; pass < 2; pass++) {
         for (const base of bases) {
           for (const p of paths) {
@@ -1730,6 +1736,11 @@ function makeWorkBuddy(channelId) {
               body: body || "{}",
             }).catch((e) => ({ ok: false, status: 0, data: null, message: String((e && e.message) || e) }));
             if (r.status === 401 && pass === 0) break; // 换 token 后重来
+            // 路径不存在 → 换下一候选（该路径已下线）
+            if (r.status === 404 || r.status === 405) {
+              lastNotFound = r;
+              continue;
+            }
             return r;
           }
         }
@@ -1738,6 +1749,8 @@ function makeWorkBuddy(channelId) {
         if (!rr.ok) return { ok: false, status: 401, data: null, message: rr.message };
         creds = { token: rr.token, refreshToken: rr.refreshToken };
       }
+      // 所有候选都是 404/405 → 如实报最后一个
+      if (lastNotFound) return lastNotFound;
       return { ok: false, status: 0, data: null, message: "上游无可用响应" };
     },
 
@@ -1798,7 +1811,10 @@ function makeWorkBuddy(channelId) {
         agentType: "conversation",
         userId: uid,
       };
-      const r = await this.billingCall(account, secrets, ["/report", "/v2/report"], JSON.stringify([event]));
+      // 路径候选：**v2 优先**。实测（2026-10-23）`/report` 已 404（端点下线），
+      // 而 `/v2/report` 活着（400 = 端点存在、body 不合）。旧顺序把下线路径排在
+      // 前面，配合 billingCall 早期「拿到第一个响应就返回」的行为 → 恒定 404。
+      const r = await this.billingCall(account, secrets, ["/v2/report", "/report"], JSON.stringify([event]));
       const code = Number((r.data && r.data.code) ?? 0);
       const succeeded = !!r.ok && (code === 0 || code === 200 || r.data == null);
       if (!succeeded) {

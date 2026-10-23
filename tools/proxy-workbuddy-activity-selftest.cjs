@@ -223,6 +223,24 @@ async function main() {
     assert(/"x-agent-type": "auxiliary"/.test(adSrc), "保活旁路用 x-agent-type: auxiliary");
     // 版本号不该再出现写死的 5.5.4 兜底
     assert(!/clientVersion \|\| "5\.5\.4"/.test(adSrc), "出站头没有写死的 5.5.4 兜底");
+
+    // ---- 计费端点路径降级（404/405 必须换下一候选）----
+    // 早先实现「拿到第一个响应就返回」不判状态码 → 排在前面但已下线的路径
+    // （实测 /report 已 404，/v2/report 活着）会把后续候选饿死，上报恒定 404。
+    assert(
+      /if \(r\.status === 404 \|\| r\.status === 405\) \{/.test(adSrc) && /lastNotFound = r;/.test(adSrc),
+      "billingCall 遇 404/405 换下一候选（不吞掉后面的活路径）"
+    );
+    assert(
+      /billingCall\(account, secrets, \["\/v2\/report", "\/report"\]/.test(adSrc),
+      "活跃上报用 /v2/report 优先（实测 /report 已 404）"
+    );
+    // 反向：实测 /v2/billing/ide/trial 已 404 而 /billing/ide/trial 活着，
+    // 所以**不能**把候选表一律改成 v2 优先——必须靠 404 降级而非改顺序
+    assert(
+      /billingCall\(account, secrets, \["\/billing\/ide\/trial", "\/v2\/billing\/ide\/trial"\]/.test(adSrc),
+      "trial 保持非 v2 优先（实测 /v2/billing/ide/trial 已 404）"
+    );
   } finally {
     server.close();
     if (prevLoc === null) fs.rmSync(locFile, { force: true });
