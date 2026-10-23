@@ -76,6 +76,8 @@ jobs:
           run_sbx tools/proxy-workbuddy-activity-selftest.cjs
           # WorkBuddy 会话 id 三件套（渠道门硬门槛：缺一即 400/11128）+ UUIDv7 形态
           run_sbx tools/proxy-wb-conversation-ids-selftest.cjs
+          # 客户端版本自检（官方更新接口）+ 出站头完整性（对照官方抓包）
+          run_sbx tools/proxy-client-version-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest

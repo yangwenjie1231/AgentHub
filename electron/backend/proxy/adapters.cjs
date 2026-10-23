@@ -1082,6 +1082,12 @@ function wbConversationHeaders(body, meta, account) {
   h["acp-connection-id"] = account && account.uid
     ? uuidFromHex16(sha256Hex("acp|" + account.uid).slice(0, 16))
     : uuidV4();
+  // 追踪族的两条**组合头**：官方桌面端每条请求都带（抓包实证），此前完全没发。
+  //  b3         = {traceId}-{spanId}-{sampled}
+  //  traceparent = 00-{traceId}-{spanId}-{flags}
+  const spanId = h["x-b3-spanid"];
+  h["b3"] = `${h["x-b3-traceid"]}-${spanId}-1`;
+  h["traceparent"] = `00-${h["x-b3-traceid"]}-${spanId}-01`;
   return h;
 }
 
@@ -1279,6 +1285,15 @@ function makeWorkBuddy(channelId) {
         "x-ide-type": ideName,
         "x-ide-version": c.clientVersion || "5.8.4",
         "x-product": c.productCode || "SaaS",
+        // OpenAI SDK 的标准头族：官方桌面端每条请求都带（抓包实证），Buddy2api 也带。
+        // 缺这一族会被判「不像官方客户端」——它标记的是「请求由 Node 的官方 OpenAI SDK 发出」。
+        "x-stainless-arch": "x64",
+        "x-stainless-lang": "js",
+        "x-stainless-os": "Windows",
+        "x-stainless-package-version": c.stainlessPackageVersion || "6.25.0",
+        "x-stainless-retry-count": "0",
+        "x-stainless-runtime": "node",
+        "x-stainless-runtime-version": c.stainlessRuntimeVersion || "v22.21.1",
       };
       // 设备风控头（auth 每号 > config 全局 > 文件兜底），空则不注入
       const devToken = (account && account.deviceToken) || c.deviceToken || readDeviceTokenFile();

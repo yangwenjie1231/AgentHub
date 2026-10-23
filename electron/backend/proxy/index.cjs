@@ -766,6 +766,23 @@ function rememberRunning(running) {
 }
 
 function register(ipcMain) {
+  // 客户端版本自检（防「版本过期 → 400/11128 请求被拦截」）
+  const clientVersion = require("./clientVersion.cjs");
+  async function checkClientVersionDrift() {
+    try {
+      const cfg = rules.get("headers.json") || {};
+      const configured = ((cfg.workbuddy_ai || {}).clientVersion) || "";
+      if (!configured) return;
+      const r = await clientVersion.checkClientVersionDrift(configured);
+      if (!r.ok) {
+        oplog.log("warn", "客户端版本", r.message, { channel: "workbuddy_ai" });
+        return;
+      }
+      oplog.log(r.stale ? "warn" : "info", "客户端版本", r.message, { channel: "workbuddy_ai" });
+    } catch (e) {
+      /* 自检失败绝不阻断启动 */
+    }
+  }
   // 请求流水保留期从设置灌入号池存储模块：gc() 只在 open()（首次摸库）时跑，register 先行不踩空。
   // 改完设置后启动 GC 要等下次开库才按新值清；想立刻按新值删一轮，用用量统计页的「清理」按钮
   // ——那条走的是实时 settings() 里的值，不依赖这里的模块变量。
@@ -776,6 +793,10 @@ function register(ipcMain) {
     const r = await server.start(settings);
     if (r.ok) rememberRunning(true);
     oplog.log(r.ok ? "info" : "error", "网关启停", r.ok ? `网关已启动（${r.already ? "本就运行中，" : ""}端口 ${r.port}）` : r.message || "启动失败");
+    // 客户端版本自检：上游按客户端身份做渠道校验，版本过期会被判 400/11128
+    // 「请求被拦截」且**没有任何提示说版本太老**。这里主动查一次官方当前版本，
+    // 落后就写告警日志——把隐形故障变成可见信号。
+    if (r.ok) checkClientVersionDrift().catch(() => {});
     events.emit({ type: "status" });
     return r.ok ? ok({ port: r.port, already: !!r.already }) : fail(r.message);
   }));
