@@ -305,6 +305,52 @@ jobs:
 
 ---
 
+## 九·附、本地自测怎么跑
+
+### 网关自测（11 个脚本，全部纯 Node）
+
+```bash
+# 逐个脚本跑，每个脚本给一个**全新**的沙箱目录
+for t in proxy-crypto-envelope proxy-adapter-contract proxy-key-lww proxy-failover \
+         proxy-modelscope proxy-credits-expiry proxy-cost-route proxy-empty-pool-route \
+         proxy-stats-rename proxy-channels proxy-agents-switch; do
+  d=$(mktemp -d); s=$(mktemp -d)
+  AGENTHUB_DATA_DIR="$d" AGENT_SKILLS_HOME="$s" node "tools/$t-selftest.cjs" || echo "FAILED: $t"
+done
+```
+
+> ⚠️ **每个脚本必须用独立的 `AGENTHUB_DATA_DIR` / `AGENT_SKILLS_HOME`。**
+> 共用一个目录会串味：前一个脚本把某渠道的 `costTier` 写进同一个库，
+> 后一个脚本就会在「未标注渠道 costTier 为空串」这类断言上假失败。
+> 上游 `gateway-ci.yml` 的 `run_sbx()` 就是每个脚本 `mktemp -d` 一次——
+> 本地照抄这个约定，否则会得到一堆假红。
+
+另有依赖闭包断言（防止 Dockerfile 的 COPY 清单与真实闭包漂移）：
+
+```bash
+node tools/gateway-closure-check.cjs      # 期望：闭包完整（145 个文件）
+```
+
+### 其余自测
+
+```bash
+npm ci
+npm run build          # vue-tsc 类型门禁 + vite 打包
+npm run verify:memory  # 记忆中枢纯代码验证
+```
+
+> `tools/verify-project-regroup-e2e.cjs` 需要本机存在真实台账
+> （`~/AgentHub/memory/projects/_index.json`），没有就会跳过；它是手动脚本，不在
+> `npm run verify:memory` 里。
+
+### 回退基线的实测结果
+
+回退基线 `bbe8373` 上的网关自测**全部通过**（11/11，闭包断言通过）：
+适配器契约 18 渠道、渠道自测 56 项、故障转移全场景、成本档路由 30 项、
+空池路由 31 项、加密信封 18 项、Key LWW 17 项、ModelScope 31 项等。
+
+---
+
 ## 十、已知坑
 
 1. **自动更新源**（最要命）。改了 `updater.cjs` 的 `GITHUB_REPO_URL` 但忘了改
