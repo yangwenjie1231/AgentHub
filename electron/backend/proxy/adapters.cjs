@@ -1044,7 +1044,11 @@ function parseWbResource(data, isEnterprise) {
  *  一次 user send 内的所有重试/换号必须复用同一个 ID）。meta 由 server 在轮转循环外生成一次，
  *  循环内换号沿用同值；B3 规范只认 16/32 hex TraceId，入站透传值非法时回落消息级 ID */
 function wbConversationHeaders(body, meta) {
-  const hex32 = () => crypto.randomBytes(16).toString("hex");
+  // 会话族 id 共享同一毫秒时间戳前缀（官方抓包实证：conversation-id /
+  // message-id / request-id / acp-connection-id 四者前 8 位相同）
+  const tsHex = Math.floor(Date.now() / 1000).toString(16).padStart(8, "0").slice(-8);
+  const rand24 = () => crypto.randomBytes(12).toString("hex"); // 24 hex
+  const hex32 = () => tsHex + rand24();
   const fromMeta = meta && typeof meta.conversationRequestId === "string" && /^[0-9a-fA-F]{16}([0-9a-fA-F]{16})?$/.test(meta.conversationRequestId)
     ? meta.conversationRequestId
     : "";
@@ -1060,9 +1064,39 @@ function wbConversationHeaders(body, meta) {
     "x-b3-spanid": messageId.slice(0, 16),
     "x-b3-sampled": "1",
   };
-  // X-Conversation-ID 透传客户端原值优先，没给就不伪造
+  // X-Conversation-ID：客户端给了就透传原值；**没给必须自己造一个**。
+  // 上游把它与 request-id / message-id 当「会话三件套」做渠道校验，缺一即 400/11128
+  // （社区对照实验实证：同一账号同一 body 同一秒，仅头差异决定 11128/200，
+  //  见 dsh-connect-workbuddy#127）。早期实现「没给就不伪造」，等于新会话必被拦。
   const convId = body && (body.conversation_id || body.conversationId);
-  if (typeof convId === "string" && convId) h["x-conversation-id"] = convId;
+  h["x-conversation-id"] = typeof convId === "string" && convId ? convId : uuidV7();
+  return h;
+}
+
+/** UUIDv7：48bit 毫秒时间戳 + 版本位 7 + variant 位 10 + 随机。
+ *  官方客户端的会话族 id 全是这个形态。按字节直改版本/variant 位，避免手搓位运算出错。 */
+function uuidV7() {
+  const b = crypto.randomBytes(16);
+  const ms = Date.now();
+  b[0] = Math.floor(ms / 2 ** 40) & 0xff;
+  b[1] = Math.floor(ms / 2 ** 32) & 0xff;
+  b[2] = Math.floor(ms / 2 ** 24) & 0xff;
+  b[3] = Math.floor(ms / 2 ** 16) & 0xff;
+  b[4] = Math.floor(ms / 2 ** 8) & 0xff;
+  b[5] = ms & 0xff;
+  b[6] = (b[6] & 0x0f) | 0x70; // version = 7
+  b[8] = (b[8] & 0x3f) | 0x80; // variant = 10xx
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+/** 会话三件套 + 追踪族：真实对话与保活旁路都必须带全。
+ *  官方抓包（2026-10-23）里 x-conversation-id / x-conversation-message-id /
+ *  x-conversation-request-id / acp-connection-id 四者共享同一 UUIDv7 时间戳前缀。 */
+function wbConversationIdHeaders(body, meta) {
+  const h = wbConversationHeaders(body, meta);
+  // acp-connection-id：官方桌面端每条对话都带（抓包实证），此前完全没发
+  h["acp-connection-id"] = uuidV7();
   return h;
 }
 
@@ -1208,10 +1242,17 @@ function makeWorkBuddy(channelId) {
         "authorization": `Bearer ${secrets.token}`,
         // 用量归属头组：伪造官方桌面端，缺了就是上游用量统计里的「网关特征」
         "x-agent-purpose": "conversation",
+        // 以下三个取自官方客户端真实抓包（2026-10-23，WorkBuddy AI 5.8.4）：
+        //   x-agent-intent: craft    —— 官方所有对话请求都带，缺它即 400/11128 渠道校验
+        //   x-agent-type:   main     —— 主对话；标题生成等旁路发 auxiliary
+        //   x-product:      SaaS     —— 官方实发值（不是 ideName！历史实现发成 "WorkBuddy"
+        //                             导致归因不到产品，见 rules.cjs 注释）
+        "x-agent-intent": "craft",
+        "x-agent-type": "main",
         "x-ide-name": ideName,
         "x-ide-type": ideName,
-        "x-ide-version": c.clientVersion || "5.5.4",
-        "x-product": ideName,
+        "x-ide-version": c.clientVersion || "5.8.4",
+        "x-product": c.productCode || "SaaS",
       };
       // 设备风控头（auth 每号 > config 全局 > 文件兜底），空则不注入
       const devToken = (account && account.deviceToken) || c.deviceToken || readDeviceTokenFile();
@@ -1248,7 +1289,8 @@ function makeWorkBuddy(channelId) {
         "content-type": "application/json",
         "accept": "application/json",
         "accept-language": channelId === "workbuddy_ai" ? "en-US" : "zh-CN",
-        "user-agent": c.billingUA || `WorkBuddy/${c.clientVersion || "5.5.4"}`,
+        // 兜底从配置取，不写死版本号——写死会随上游轮换悄悄过期（曾长期停在 5.5.4）
+        "user-agent": c.billingUA || `WorkBuddy/${c.clientVersion || ""}`.replace(/\/$/, ""),
         "x-codebuddy-request": "1",
         "authorization": `Bearer ${secrets.token}`,
       };
@@ -1448,7 +1490,7 @@ function makeWorkBuddy(channelId) {
     async chat({ account, secrets, model, body, emit, meta }) {
       const c = this.cfg();
       const payload = JSON.stringify(this.rewriteBody(model, body, account));
-      const headers = { ...this.headers(account, secrets), ...wbConversationHeaders(body, meta) };
+      const headers = { ...this.headers(account, secrets), ...wbConversationIdHeaders(body, meta) };
       const urls = [c.chatUrl, c.consoleChatUrl].filter(Boolean);
       let resp = null;
       let cancelTimer = () => {};
@@ -1741,6 +1783,16 @@ function makeWorkBuddy(channelId) {
       const c = this.cfg();
       const FREE_MODELS = ["hy3"];
       const models = [...new Set([...(c.keepaliveModels || []), ...FREE_MODELS])];
+      // 保活是后台旁路调用，官方对这类请求发 x-agent-type: auxiliary（抓包实证：
+      // 标题生成等旁路 = auxiliary，用户主动对话 = main）。主对话走 main。
+      // 会话三件套也必须带全——缺一个就是 400/11128（渠道门，与请求体内容无关），
+      // 这正是「干净到只有 hi 的保活请求也被拦」的原因。
+      const headers = {
+        ...this.headers(account, secrets),
+        ...wbConversationIdHeaders(null, null),
+        "x-agent-type": "auxiliary",
+        "x-agent-purpose": "conversation",
+      };
       let lastMsg = "";
       for (const model of models) {
         const payload = JSON.stringify({
@@ -1755,7 +1807,7 @@ function makeWorkBuddy(channelId) {
         try {
           const { resp, cancelTimer } = await fetchStream(c.chatUrl, {
             method: "POST",
-            headers: this.headers(account, secrets),
+            headers,
             body: payload,
             firstByteMs: 20000,
           });

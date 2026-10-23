@@ -74,6 +74,8 @@ jobs:
           run_sbx tools/proxy-credit-floor-selftest.cjs
           # WorkBuddy 国际版每日活跃三条通道 + 「加油包领不到也要跑免费模型对话」门槷回归
           run_sbx tools/proxy-workbuddy-activity-selftest.cjs
+          # WorkBuddy 会话 id 三件套（渠道门硬门槛：缺一即 400/11128）+ UUIDv7 形态
+          run_sbx tools/proxy-wb-conversation-ids-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest

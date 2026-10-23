@@ -291,15 +291,23 @@ const DEFAULTS = {
       consoleChatUrl: "https://www.workbuddy.ai/console/chat/completions",
       billingBase: "https://www.workbuddy.ai",
       origin: "https://www.workbuddy.ai",
-      clientVersion: "5.5.4",
-      cliVersion: "2.137.1",
+      // 版本三件套必须跟官方客户端同步更新——上游按它做渠道校验，过期即 400/11128。
+      // 取值来自 2026-10-23 官方桌面端真实抓包（getmessaagefromai/logs/requests-2026-10-23.jsonl）：
+      //   UA = WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0
+      //   x-ide-version = 5.8.4
+      // ⚠ 曾长期停在 5.5.4（2026-09-16 起未更新），与官方差三个小版本，
+      //   表现为「干净请求体也被 11128 拦」——内容层怎么改都救不了。
+      clientVersion: "5.8.4",
+      cliVersion: "2.161.0",
       // 平台段必须 WorkBuddy AI，送错触发 403 code 11140 request illegal
-      userAgent: "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1",
-      billingUA: "WorkBuddy/5.5.4",
+      userAgent: "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0",
+      billingUA: "WorkBuddy/5.8.4",
       ideName: "WorkBuddy",
+      // 官方客户端实发值就是 "SaaS"（抓包证实），不是 ideName
+      productCode: "SaaS",
       modelsUrl: "https://www.workbuddy.ai/console/enterprises/personal/models",
       modelsV3Url: "https://www.workbuddy.ai/v3/config",
-      catalogUA: "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1",
+      catalogUA: "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0",
       pluginBase: "https://www.workbuddy.ai",
       refreshSource: "plugin",
       deviceToken: "",

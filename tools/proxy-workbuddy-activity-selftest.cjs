@@ -30,6 +30,26 @@ function assert(cond, label, extra) {
   else { failures++; console.error("  FAIL " + label + (extra ? " —— " + extra : "")); }
 }
 
+/** 取 rules.cjs 里某个渠道在 **headers.json** 配置段的源码（供真值断言用）。
+ *  同一渠道名在文件里出现多次（wb_models.json 目录段 / headers.json 配置段），
+ *  必须挑含 chatUrl 的那一处——否则断言读到的是模型目录而不是配置，
+ *  会全部假失败（实测踩过：indexOf 命中第一处就返回了）。 */
+const fsRead = require("node:fs");
+const pathMod = require("node:path");
+function rulesSrcFor(channel) {
+  const src = fsRead.readFileSync(pathMod.join(__dirname, "..", "electron", "backend", "proxy", "rules.cjs"), "utf8");
+  const needle = `${channel}: {`;
+  let from = 0;
+  for (;;) {
+    const start = src.indexOf(needle, from);
+    if (start < 0) return "";
+    const end = src.indexOf("\n    },", start);
+    const block = src.slice(start, end < 0 ? undefined : end + 6);
+    if (block.includes("chatUrl")) return block;
+    from = start + needle.length;
+  }
+}
+
 async function main() {
   const seen = [];
   let failMode = "";
@@ -183,6 +203,26 @@ async function main() {
       /\[\.\.\.new Set\(\[\.\.\.\(c\.keepaliveModels \|\| \[\]\), \.\.\.FREE_MODELS\]\)\]/.test(adSrc),
       "配置项排在默认链前面（显式配置优先）"
     );
+
+    // ---- ⑥ 客户端标识必须对齐官方抓包真值 ----
+    // 真值来源：官方 WorkBuddy AI 桌面端抓包 2026-10-23（5.8.4 / CLI 2.161.0）。
+    // 版本三件套过期 → 上游渠道校验 400/11128，且**与请求体内容无关**
+    // （实测：干净到只有 "You are a helpful assistant." + "hi" 的保活请求同样被拦），
+    // 内容层怎么改都救不了。故这里把每个字段钉住。
+    const EXPECT_UA = "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0";
+    assert(/clientVersion: "5\.8\.4"/.test(adSrc) || /clientVersion: "5\.8\.4"/.test(rulesSrcFor("workbuddy_ai")),
+      "clientVersion = 5.8.4（官方抓包真值）");
+    assert(/cliVersion: "2\.161\.0"/.test(rulesSrcFor("workbuddy_ai")), "cliVersion = 2.161.0");
+    assert(rulesSrcFor("workbuddy_ai").includes(`userAgent: "${EXPECT_UA}"`), "userAgent 三段式对齐官方（注意是小写 workbuddy-ai）");
+    assert(rulesSrcFor("workbuddy_ai").includes(`productCode: "SaaS"`), "productCode = SaaS（官方实发值，不是 ideName）");
+    // 出站头必须带 x-agent-intent / x-agent-type，且 x-product 不能是 ideName
+    assert(/"x-agent-intent": "craft"/.test(adSrc), "出站带 x-agent-intent: craft");
+    assert(/"x-agent-type": "main"/.test(adSrc), "主对话出站带 x-agent-type: main");
+    assert(/"x-product": c\.productCode/.test(adSrc), "x-product 取配置的 productCode（不回退成 ideName）");
+    // 保活是旁路，用 auxiliary
+    assert(/"x-agent-type": "auxiliary"/.test(adSrc), "保活旁路用 x-agent-type: auxiliary");
+    // 版本号不该再出现写死的 5.5.4 兜底
+    assert(!/clientVersion \|\| "5\.5\.4"/.test(adSrc), "出站头没有写死的 5.5.4 兜底");
   } finally {
     server.close();
     if (prevLoc === null) fs.rmSync(locFile, { force: true });
