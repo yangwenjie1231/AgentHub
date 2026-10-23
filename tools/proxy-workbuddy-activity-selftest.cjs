@@ -221,6 +221,12 @@ async function main() {
     assert(/"x-product": c\.productCode/.test(adSrc), "x-product 取配置的 productCode（不回退成 ideName）");
     // 保活是旁路，用 auxiliary
     assert(/"x-agent-type": "auxiliary"/.test(adSrc), "保活旁路用 x-agent-type: auxiliary");
+    // X-Private-Data：官方桌面端对话请求带它（AutoBuddy 国际版实现 + dsh-connect-workbuddy#127）
+    assert(/"x-private-data": "true"/.test(adSrc), "出站带 x-private-data: true");
+    // 追踪族组合头（官方抓包有，此前完全没发）
+    assert(/h\["b3"\] =/.test(adSrc) && /h\["traceparent"\] =/.test(adSrc), "出站带 b3 与 traceparent 组合头");
+    // OpenAI SDK 标准头族（官方抓包有）
+    assert(/"x-stainless-runtime": "node"/.test(adSrc), "出站带 x-stainless-* 头族");
     // 版本号不该再出现写死的 5.5.4 兜底
     assert(!/clientVersion \|\| "5\.5\.4"/.test(adSrc), "出站头没有写死的 5.5.4 兜底");
 

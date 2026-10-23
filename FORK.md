@@ -352,10 +352,40 @@ git cherry-pick <commit>                        # 单个提交，不做 merge
 | [hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api) | 2026-10-23 | `desensitize.py` 的**词级零宽空格** + `PR #4` 的**harness 语义压缩** |
 | [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) | 2026-10-21 | `pool/credit_floor*` 的**积分保底**与「免费模型不被连坐」 |
 | [Ebony-Vinyl/dsh-our-free-model](https://github.com/Ebony-Vinyl/dsh-our-free-model) issue #544 / #568 / #570 / #603 | 2026-10-22 ~ 10-23 | **11128 判定语义的实测测绘**（12 组探针、三条指纹、双端点对照） |
+| [deltrivx/AutoBuddy](https://github.com/deltrivx/AutoBuddy) `gateway/vendor/workbuddy_intl_daily.py` | 2026-10-23 | **国际版专用**的对话头族 / 活跃三端点 / 报告事件形状 |
+| [FlapPearLabs/workbuddy-toolkit](https://github.com/FlapPearLabs/workbuddy-toolkit) `scripts/compat_monitor.py` | 2026-10-23 | **上游协议漂移监控**清单 + 官方更新接口的用法 |
 
 > 核对过：这些仓库/issue 在 2026-10 仍在按真实拦截补词、补判据，代码在活跃路径上
 > （不是 legacy 目录、不是关着的开关）。**不要**去抄 AgentHub 旧版那种
 > 「5 条整句精确改写」的封闭枚举——那正是 issue #156 的根因。
+
+### ⚠ 抄别人实现前，先确认「是不是同一个东西」
+
+同类项目**普遍同时支持国内版与国际版**，两条产品线是**两套独立实现**，细节互不相同。
+踩过的坑：AutoBuddy 的 `workbuddy_daily.py`（国内，`www.workbuddy.cn` /
+`copilot.tencent.com`）与 `workbuddy_intl_daily.py`（国际，`www.workbuddy.ai`）
+是两个文件——把国内版的做法套到国际版上是错的（一度以为它的活跃上报要送
+「环境指纹对象」，其实国际版送的就是 `chat_request_send` 事件数组，与本 fork 一致）。
+
+**规矩**：
+
+1. 先按**产品线**定位到对应文件（国际版 = `workbuddy.ai` / `workbuddy_intl_*`），
+   不要看仓库首页或文件名。
+2. 登录态、账号体系、模型目录、错误码语义**两条线互不通用**
+   （AutoBuddy 代码里明写「国际版 www.workbuddy.ai 与国内版 www.workbuddy.cn 的
+   登录态互不通用」）。
+3. 端点存活情况**按域分别探测**，不能跨域推断。本 fork 2026-10-23 的实测：
+   `POST /report` 在两个域都 404，而 `POST /v2/report` 都活着；
+   但 `/v2/billing/ide/trial` 404 而 `/billing/ide/trial` 活着——**v2 优先级并不一致**。
+   故 `billingCall` 改成「遇 404/405 换下一候选」，而不是改顺序去猜。
+4. 头部差异要**逐个字段**比。本 fork 对照官方抓包（`getmessaagefromai` 的
+   `requests-2026-10-23.jsonl`）与 AutoBuddy 国际版实现后补了 `X-Private-Data`、
+   `x-stainless-*` 全族、`b3`、`traceparent`、`acp-connection-id`。
+5. 别人「特意不发」的头，往往是**实测出来的网关特征**——AutoBuddy 国际版明确注释
+   「不再发 X-Session-ID —— 官方对话请求不带它，旧的恒定派生值本身是一处网关特征」。
+   本 fork 仍保留 `x-machine-id` / `x-session-id`（2026-09 的 `bdadac1` 为防
+   「设备指纹缺失/漂移」风控而加，且实测可用），但已知它与官方不一致——**改动前
+   先实测**，不要盲从任一方。
 
 ### 11128 到底在查什么（#603 实测，先读懂再动手）
 

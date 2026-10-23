@@ -1281,6 +1281,10 @@ function makeWorkBuddy(channelId) {
         //                             导致归因不到产品，见 rules.cjs 注释）
         "x-agent-intent": "craft",
         "x-agent-type": "main",
+        // 官方桌面端对话请求带 X-Private-Data: true（AutoBuddy 国际版实现 +
+        // dsh-connect-workbuddy#127 列举的「与真客户端一致」头清单里都有它）。
+        // 缺了就是官方客户端不会发的一组头里的少一个。
+        "x-private-data": "true",
         "x-ide-name": ideName,
         "x-ide-type": ideName,
         "x-ide-version": c.clientVersion || "5.8.4",
