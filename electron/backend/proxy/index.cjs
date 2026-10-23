@@ -226,7 +226,16 @@ async function checkinBatch({ channel, accountId, action, interactive }) {
         rows.push({ accountId: acc.id, channel: acc.channel, name: acc.name, uid: acc.uid, ok: false, message: `未知渠道 ${acc.channel}（适配器未注册）` });
         continue;
       }
-      const useAct = act === "checkin" && acc.channel === "workbuddy_ai" ? "trial" : act;
+      // ⚠ workbuddy_ai 的「签到」动作**不再改道成 trial**。
+      // 旧实现（2026-09-17 依上游 issue #277「国际版没有签到体系」）把 checkin 整体
+      // 改走 trial，等于**从来没调用过 /v2/billing/meter/daily-checkin**——而每日积分
+      // 正是走 daily-checkin 领的；trial 是一次性加油包（领过即 14051「已领取」）。
+      // 反证：2026-10-23 实测该端点在 www.workbuddy.ai 存活（401），且同产品线的
+      // AutoBuddy 国际版实现（gateway/vendor/workbuddy_intl_daily.py）明确走
+      // 「探测 checkin-activity-status → 领 /v2/billing/meter/daily-checkin → 活跃三件事」。
+      // 现在三件事互补，都跑，结论取并集（daily-checkin 幂等，「已签到」不算失败）。
+      const isIntlWorkBuddy = acc.channel === "workbuddy_ai";
+      const useAct = act;
       let secrets = store.accountSecrets(store.getAccount(acc.id));
       try {
         // 凭证保鲜：手上 token 已过期/临期时先刷一次（与余额链路 ensureFreshSecrets 同一口径）。
@@ -264,26 +273,42 @@ async function checkinBatch({ channel, accountId, action, interactive }) {
             }
           }
         } else r = typeof ad.trial === "function" ? await ad.trial(acc, secrets) : { ok: false, message: "该渠道没有加油包" };
-        // 国际版每日活跃（保活三件事）：issue #277 的实测结论——国际版没有签到体系，
-        // 每日奖励的判定挂在①活跃上报 ②免费模型对话 ③网页会话 三条通道上，缺一条就领不到。
-        // 放在 trial 之后：领完加油包顺手把「今日活跃」做掉，用户点一次就完整跑一遍。
-        // 纯 best-effort：失败只拼进 message，绝不把 trial 的 ok 翻成失败（活动开关在上游手里，
-        // 关掉活动不该让整个定时签到报错）。status/桌面端不触发，避免只查状态就写上游。
-        // ⚠ 门槛**不能**挂在 trial 成败上：加油包是一次性 trial 端点，领过或下线后必然返回
-        // 失败，而「免费模型对话」才是每日积分的主通道。以 trial 成败做门槛，会让领不到
-        // 加油包的账号连带拿不到每日积分——这正是用户反馈「没有办法领加油包」时的实证。
-        if (useAct === "trial" && typeof ad.dailyActivity === "function") {
-          try {
-            const da = await ad.dailyActivity(acc, secrets);
-            r.dailyActivity = da;
-            if (da && da.message) r.message = `${r.message || ""}${r.message ? " · " : ""}每日活跃：${da.message}`.slice(0, 400);
-            // 加油包领不到，但三条活跃通道走通了 → 本次动作算成功。
-            // 每日积分就是这么发的，让 trial 的失败定生死会直接把主通道埋掉
-            if (r.ok === false && da && da.ok) r.ok = true;
-          } catch (e) {
-            r.dailyActivity = { ok: false, message: String((e && e.message) || e) };
+        // ===== 国际版（workbuddy_ai）：签到 + 加油包 + 每日活跃，三件事互补 =====
+        // 旧实现把 checkin 动作整体改道成 trial，只剩加油包 + 活跃。现在三者都跑：
+        //  ① ad.checkin()          领每日签到（daily-checkin，幂等）
+        //  ② ad.trial()            一次性加油包（领过即 14051，best-effort）
+        //  ③ ad.dailyActivity()    活跃三件事（活跃上报 / 免费模型对话 / 网页会话）
+        // 结论取并集：任一成功即算本次动作成功（daily-checkin 与活跃通道都可能是主路径，
+        // 上游的发放口径在不同版本/活动期会变，不该让某一条失败把整体判死）。
+        if (isIntlWorkBuddy && useAct === "checkin") {
+          const parts = [];
+          // ② 加油包（best-effort）
+          if (typeof ad.trial === "function") {
+            const tr = await ad.trial(acc, secrets).catch((e) => ({ ok: false, message: String((e && e.message) || e) }));
+            if (tr && tr.claimed) parts.push("加油包已领");
+            else if (tr && tr.already) parts.push("加油包此前已领");
+            else if (tr && tr.message) parts.push(`加油包：${tr.message}`);
+            if (tr && tr.ok) r.ok = true;
           }
+          // ③ 每日活跃三件事
+          if (typeof ad.dailyActivity === "function") {
+            try {
+              const da = await ad.dailyActivity(acc, secrets);
+              r.dailyActivity = da;
+              if (da && da.message) parts.push(`每日活跃：${da.message}`);
+              if (da && da.ok) r.ok = true;
+            } catch (e) {
+              r.dailyActivity = { ok: false, message: String((e && e.message) || e) };
+            }
+          }
+          const main = String(r.message || "每日签到完成");
+          const merged = [main, ...parts].filter(Boolean).join(" · ");
+          r.message = merged.slice(0, 500);
         }
+        // 注：原先此处有一段 `if (useAct === "trial") { ...dailyActivity... }`。
+        // 国际版的「签到」动作已在上方合并处理（签到 + 加油包 + 每日活跃 三者互补），
+        // 这里若再跑一遍会把每日活跃重复发两次（多打上游 + 重复计数），故移除。
+        // `action: "trial"` 作为独立入口仍可用：此时只跑加油包（不跑活跃链）。
         // 小浣熊首登奖励（一次性新手福利，桌面端/手机端各一条）自动领取：台账（meta.onboardingGrants）
         // 未结算才探测，成功（含幂等 granted=false）落标记，失败不落、下轮签到/自动签到自然重试
         // （「直到领取成功，后续不再领取」）。签到失败（401/网络）时跳过——凭证问题领取也必然失败

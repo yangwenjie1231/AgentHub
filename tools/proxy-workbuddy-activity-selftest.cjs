@@ -164,20 +164,20 @@ async function main() {
     assert(typeof bad.message === "string" && bad.message.includes("失败"), "全失败文案如实报错");
 
     // ---- ④ 门槷回归：加油包领不到，每日活跃也必须跑 ----
-    // 加油包是一次性 trial 端点，领过或下线后必然返回失败。若 dailyActivity 以
+    // 加油包是一次性 trial 端点，领过或下线后必然返回失败。若每日活跃以
     // trial 成败为门槛，领不到加油包的账号就永远拿不到「免费模型对话」这条
     // 每日积分主通道——用户反馈的实证。这里用源码断言把这个门槛钉住。
     const idxSrc = fs.readFileSync(path.join(__dirname, "..", "electron", "backend", "proxy", "index.cjs"), "utf8");
     assert(
-      /if \(useAct === "trial" && typeof ad\.dailyActivity === "function"\)/.test(idxSrc),
-      "dailyActivity 只以「国际版 trial 动作」为门槛，不看 trial 成败"
+      /isIntlWorkBuddy && useAct === "checkin"/.test(idxSrc),
+      "每日活跃挂在「国际版签到」分支上（不再挂在 trial 上——trial 是一次性的，领过即失败）"
     );
     assert(
       !/r\.ok !== false && typeof ad\.dailyActivity/.test(idxSrc),
       "旧的「trial 成功才跑每日活跃」门槛已移除"
     );
     assert(
-      /if \(r\.ok === false && da && da\.ok\) r\.ok = true;/.test(idxSrc),
+      /if \(tr && tr\.ok\) r\.ok = true;/.test(idxSrc) && /if \(da && da\.ok\) r\.ok = true;/.test(idxSrc),
       "加油包失败但活跃通道走通时，本次动作判成功（主通道不被 trial 埋掉）"
     );
 
@@ -247,6 +247,34 @@ async function main() {
       /billingCall\(account, secrets, \["\/billing\/ide\/trial", "\/v2\/billing\/ide\/trial"\]/.test(adSrc),
       "trial 保持非 v2 优先（实测 /v2/billing/ide/trial 已 404）"
     );
+
+    console.log("7. 国际版签到动作不得被改道成加油包");
+    const ix = fsRead.readFileSync(pathMod.join(__dirname, "..", "electron", "backend", "proxy", "index.cjs"), "utf8");
+    // 旧实现：`act === "checkin" && acc.channel === "workbuddy_ai" ? "trial" : act`
+    // → workbuddy_ai 从来没调用过 /v2/billing/meter/daily-checkin，
+    //   而每日积分正是走 daily-checkin 领的（trial 是一次性的，领过即 14051）。
+    assert(
+      !/act === "checkin" && acc\.channel === "workbuddy_ai" \? "trial"/.test(ix),
+      "checkin 动作不再把 workbuddy_ai 改道成 trial（否则每日签到端点从没被领过）"
+    );
+    // 三件事互补：签到 + 加油包 + 每日活跃，都跑，结论取并集
+    assert(/isIntlWorkBuddy && useAct === "checkin"/.test(ix), "国际版签到走三件事合并分支");
+    assert(/ad\.trial\(acc, secrets\)/.test(ix) && /ad\.dailyActivity\(acc, secrets\)/.test(ix),
+      "国际版签到同时跑加油包与每日活跃");
+    assert(/if \(tr && tr\.ok\) r\.ok = true;/.test(ix) && /if \(da && da\.ok\) r\.ok = true;/.test(ix),
+      "任一通道成功即算本次动作成功（不因单条失败判死）");
+    // 每日签到端点必须在适配器里实现（否则改道解除了也没得领）
+    assert(
+      /"\/v2\/billing\/meter\/daily-checkin"/.test(adSrc),
+      "适配器实现了 daily-checkin（国际版每日积分的领取端点）"
+    );
+    assert(
+      /"\/billing\/meter\/checkin-activity-status"/.test(adSrc),
+      "适配器实现了 checkin-activity-status（活动是否开放的探测端点）"
+    );
+    // 旧的重复分支必须移除，否则每日活跃会跑两次
+    assert(!/if \(useAct === "trial" && typeof ad\.dailyActivity === "function"\)/.test(ix),
+      "旧的 trial 分支不再重复跑每日活跃");
   } finally {
     server.close();
     if (prevLoc === null) fs.rmSync(locFile, { force: true });
