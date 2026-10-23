@@ -625,6 +625,8 @@ const MOCK_CFG: Record<string, unknown> = {
   import: { dryRunFirst: true, batchSize: 200, maxBatchBytes: 8388608, sensitiveSkip: true, md: { observationMarkers: true, extractTags: true }, sources: [] },
   privacy: { redact: false, pause: false, localOnlyProjects: [] },
   sync: { enabled: true, auto: true, intervalMin: 60, packSizeLimitMB: 50, excludeIndex: true },
+  // 模型与网关：预览态也要有这两个数（设置 · 模型与网关的「请求超时 / 失败重试」直接读它）
+  models: { timeout: 60, maxRetries: 3 },
   ui: { pageSize: 50, defaultTab: "dashboard", tabs: ["dashboard", "browse", "projects", "profile", "agents", "auto", "import", "sync"], realtimeRefresh: true },
 };
 

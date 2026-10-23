@@ -221,13 +221,16 @@ export type WebDavEvent = { event: "webdav"; stage: string; detail: string; pct?
 
 // ===== 全局设置弹窗：左下角设置按钮打开的三个模块（弹窗左列按钮切换） =====
 
-export type SettingsTab = "general" | "webdav" | "data" | "timing" | "feedback";
+export type SettingsTab = "general" | "webdav" | "data" | "models" | "timing" | "feedback";
 
 export const SETTINGS_TABS: { key: SettingsTab; name: string; icon: string; desc: string }[] = [
   { key: "general", name: "通用", icon: "ph-sliders-horizontal", desc: "外观 · 模块顺序 · 更新" },
   { key: "webdav", name: "WebDAV 同步", icon: "ph-cloud", desc: "统一服务器 · 号池同步" },
   { key: "timing", name: "同步时间", icon: "ph-clock-countdown", desc: "各板块自动同步 / 刷新周期" },
   { key: "data", name: "数据与备份", icon: "ph-database", desc: "备份压缩包 · 缓存目录" },
+  // 模型与网关：平台级配置（供应商 / 模型池 / 来源优先级 / 本机网关），
+  // 记忆中枢只是当前消费方之一，未来新增板块统一复用这里
+  { key: "models", name: "模型与网关", icon: "ph-cpu", desc: "供应商 · 模型池 · 来源优先级 · 本机网关" },
   { key: "feedback", name: "反馈与需求", icon: "ph-chat-circle-dots", desc: "问题反馈 · 功能建议" },
 ];
 
