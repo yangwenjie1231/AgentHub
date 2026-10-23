@@ -1963,10 +1963,14 @@ function makeWorkBuddy(channelId) {
       const d = (r.data && (r.data.data || r.data)) || null;
       const code = Number((r.data && r.data.code) ?? 0);
       if (!r.ok || !d || (code !== 0 && code !== 200)) {
+        // 「已签到 / 未开放」也是幂等码在 code 里的形态（如 14001），不能只在 msg 里找
+        const raw = String((r.data && (r.data.message || r.data.msg)) || r.message || "");
+        const unavailable = code === 14001 || code === 10001 || /\b(14001|10001)\b/.test(raw) ||
+          /已签到|already|未开启|未开放|已过期/i.test(raw);
         return {
           ok: false,
-          unavailable: /已签到|already|未开启|未开放|已过期/i.test(String((r.data && (r.data.message || r.data.msg)) || r.message || "")),
-          message: String((r.data && (r.data.message || r.data.msg)) || r.message || `HTTP ${r.status}`),
+          unavailable,
+          message: raw || `HTTP ${r.status}`,
         };
       }
       const b = (k1, k2) => {
@@ -2006,17 +2010,28 @@ function makeWorkBuddy(channelId) {
           reward: (d && d.reward) || null,
         };
       }
-      const already = /\b(10001|14001)\b/.test(msg) || /已签到|今日已签到|already/i.test(msg);
+      // 幂等判定：幂等码在 **code 字段**（上游报 {"code":14001,"msg":"already checked in"}），
+      // 不能只在 msg 里找数字——旧实现漏判 → 「已签到」被当成失败。
+      const already = code === 10001 || code === 14001 || /\b(10001|14001)\b/.test(msg) ||
+        /已签到|今日已签到|already|has been checked/i.test(msg);
       return { ok: already, already, message: msg || `签到失败 HTTP ${r.status}` };
     },
 
-    /** 国际版一次性 trial 加油包（CN 无此端点）：幂等码 14051 = 已领过 */
+    /** 国际版一次性 trial 加油包（CN 无此端点）：幂等码 14051 = 已领过。
+     *  ⚠ 幂等判定必须看 **code 字段**，不能只在 msg 里找数字：上游实际报文是
+     *  `{"code":14051,"msg":"has applied trial"}` —— 14051 在 code 里、msg 里没有。
+     *  旧实现只正则扫 msg，于是「已领过」落到最后的失败分支 → **明明领过却报失败**
+     *  （用户反馈「没有办法领加油包」的真正原因：不是领不到，是判定写错）。
+     *  另外英文文案是 "has applied trial"，不含 "already"，故文案匹配要带上 applied。 */
     async trial(account, secrets) {
       const r = await this.billingCall(account, secrets, ["/billing/ide/trial", "/v2/billing/ide/trial"], "{}");
       const code = Number((r.data && r.data.code) ?? 0);
       const msg = String((r.data && (r.data.message || r.data.msg)) || r.message || "");
       if (r.ok && (code === 0 || code === 200)) return { ok: true, claimed: true, message: msg || "加油包领取成功" };
-      if (/\b14051\b/.test(msg) || /已领取|已领过|already/i.test(msg)) return { ok: true, claimed: false, already: true, message: msg || "已领取过" };
+      // 已领过：幂等码在 code 里，或文案命中（中/英皆覆盖）
+      if (code === 14051 || /\b14051\b/.test(msg) || /已领取|已领过|already|has applied|applied trial/i.test(msg)) {
+        return { ok: true, claimed: false, already: true, message: msg || "已领取过" };
+      }
       return { ok: false, message: msg || `领取失败 HTTP ${r.status}` };
     },
 

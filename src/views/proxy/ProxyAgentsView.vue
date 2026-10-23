@@ -561,12 +561,16 @@ async function runCheckinAccount(acc: ProxyAccount) {
   }
 }
 
-/** 国际版加油包（trial）：AI 无每日签到，只有一次性加油包 */
-async function runTrial() {
+/** 国际版「每日领积分」：签到 + 加油包 + 每日活跃 三件事互补（见 server 侧 checkinBatch）。
+ *  ⚠ 必须发 action:"checkin" 而不是 "trial"：
+ *  "trial" 只跑一次性加油包（领过即 14051），每日签到端点（daily-checkin）
+ *  与每日活跃三通道都不会跑——每日积分就永远发不出来。
+ *  后端对 workbuddy_ai 的 "checkin" 动作会一并处理加油包与活跃，故这里发 checkin 即可。 */
+async function runIntlDaily() {
   if (checkinBusy.value) return;
   checkinBusy.value = true;
   try {
-    const r = await api.proxyCheckinRun({ channel: "workbuddy_ai", action: "trial" });
+    const r = await api.proxyCheckinRun({ channel: "workbuddy_ai", action: "checkin" });
     if (r.ok === false) {
       toast(r.message || "领取失败", "err");
       return;
@@ -1634,7 +1638,7 @@ onUnmounted(() => {
                 class="btn btn-sm"
                 :class="{ 'btn-checkin-done': !checkinBusy && channelCheckinDone(ch) }"
                 :disabled="checkinBusy"
-                @click="runTrial"
+                @click="runIntlDaily"
               >{{ checkinBusy ? "领取中…" : channelCheckinDone(ch) ? labelsOf(ch.id).done : labelsOf(ch.id).run }}</button>
             </el-tooltip>
             <el-tooltip v-else-if="ch.id === 'zcode' && zcodeHasReward" :content="checkinToolbarTitle(ch)" placement="top">

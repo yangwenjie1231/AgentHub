@@ -275,6 +275,36 @@ async function main() {
     // 旧的重复分支必须移除，否则每日活跃会跑两次
     assert(!/if \(useAct === "trial" && typeof ad\.dailyActivity === "function"\)/.test(ix),
       "旧的 trial 分支不再重复跑每日活跃");
+    // UI 按钮必须发 checkin（发 trial 只跑加油包，每日签到端点不会被调用）
+    const vw = fsRead.readFileSync(pathMod.join(__dirname, "..", "src", "views", "proxy", "ProxyAgentsView.vue"), "utf8");
+    assert(
+      /action: "checkin"[\s\S]{0,200}workbuddy_ai|proxyCheckinRun\(\{ channel: "workbuddy_ai", action: "checkin" \}\)/.test(vw),
+      "号池页「每日领积分」按钮发 action:checkin（发 trial 只会跑加油包）"
+    );
+    assert(!/proxyCheckinRun\(\{ channel: "workbuddy_ai", action: "trial" \}\)/.test(vw),
+      "号池页不再对 workbuddy_ai 发 action:trial");
+
+    console.log("8. 幂等判定必须看 code 字段（不是只扫 msg）");
+    // 上游实际报文：{"code":14051,"msg":"has applied trial"} / {"code":14001,"msg":"already checked in"}
+    // 14051 / 14001 在 code 里，msg 里没有数字；英文文案也不含 "already"（trial 那条是 "has applied"）
+    // 旧实现只正则扫 msg → 「已领过 / 已签到」落到失败分支 → 明明领过却报失败
+    assert(
+      /code === 14051 \|\|/.test(adSrc),
+      "trial 幂等判定看 code === 14051"
+    );
+    assert(
+      /has applied|applied trial/i.test(adSrc),
+      "trial 幂等文案覆盖英文 has applied trial"
+    );
+    assert(
+      /code === 10001 \|\| code === 14001 \|\|/.test(adSrc),
+      "checkin 幂等判定看 code === 10001/14001"
+    );
+    assert(
+      /code === 14001 \|\| code === 10001 \|\|/.test(adSrc.split("checkin-activity-status").join("")) ||
+        /unavailable = code === 14001/.test(adSrc),
+      "checkinStatus 的 unavailable 判定也看 code"
+    );
   } finally {
     server.close();
     if (prevLoc === null) fs.rmSync(locFile, { force: true });

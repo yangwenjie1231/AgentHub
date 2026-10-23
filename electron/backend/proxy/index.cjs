@@ -1496,4 +1496,4 @@ function register(ipcMain) {
 }
 
 // 计划判定与抖动的纯函数一并导出：供自测直接验证跨午夜 / 不补欠账 / 已完成等分支
-module.exports = { boot, shutdown, stopTimers, setRuntime, register, settings, checkinJitterOffset, checkinPlannedAt, checkinDueKey, parseAccountsJson, normalizeAccountJson, METADATA_ONLY_MESSAGE };
+module.exports = { boot, shutdown, stopTimers, setRuntime, register, settings, checkinJitterOffset, checkinPlannedAt, checkinDueKey, parseAccountsJson, normalizeAccountJson, METADATA_ONLY_MESSAGE, checkinBatch };
