@@ -109,12 +109,41 @@ fork 仓库当前状态：
 | `README.md` / `README.en.md` | 加 fork 声明；下载与 clone 链接指向本 fork | 避免用户从上游页面下到没有反代网关的版本 |
 | `FORK.md` | 新增 | 本文件 |
 
-**刻意没改的**：
+### 从上游移植的三个提交（已落地）
+
+回退不是「停在旧版本不动」——上游在网关下线之后仍在改进计费与记忆中枢，
+这些改动与网关正交，已经挑选移植过来：
+
+| 上游 commit | 内容 | 与网关的关系 | 落地方式 |
+| --- | --- | --- | --- |
+| `58927fd` | 优化计费规则（新增 `billing_expr` 分层表达式解析、models.dev 预设解析、缓存读写价默认系数） | **零交集** —— 不碰任何网关文件，配置命名空间是 `billing.*`（网关在 `proxy.*`） | cherry-pick，零冲突 |
+| `437afbd` | 模型与网关迁入全局设置，路由链独立成面板 | 相关但不冲突 —— 面板从记忆中枢搬到全局设置，**网关档保留**（只是默认序从第 2 位降到末位） | cherry-pick + 版本号冲突解 ours + **手工补 `models` 页签**（见下） |
+| `a38940d` | 三套在线价格表同构卡片（官方倍率 / models.dev / 远程表），schema 9 → 10 | **零交集** —— 只动 `electron/preload.cjs` 的计费白名单段，网关 `proxy_*` 82 条完整保留 | cherry-pick，零冲突（须排在 `58927fd` 之后） |
+
+移植后实测：`vue-tsc --noEmit` exit 0 · `vite build` exit 0 · 计费自测 65/0 ·
+记忆供应商自测 66/0（基线 55/0）· `verify:memory` 26/0 · 网关闭包 145 文件完整 ·
+代理命令表 8/0（82 条命令）· 网关自测 11/11。
+
+> **`437afbd` 踩过的坑（务必知道）**：它依赖上游 `fdb3e55`（正是我们回滚掉的那个
+> 网关下线提交）引入的 `src/types/index.ts` 改动 —— `SettingsTab` 联合类型加
+> `"models"`、`SETTINGS_TABS` 加一个页签条目。cherry-pick **不会**把这两处带过来，
+> 于是：编译期 9 条 TS 错误（`vue-tsc` 退出码 2）；即使绕过类型检查，设置弹窗
+> **根本不渲染「模型与网关」页签**，整个面板静默不可达。
+> 本 fork 已手工补齐（`src/types/index.ts` + `src/api/mock.ts`）。
+> **后续若上游再动 `SettingsTab` 联合类型，需手工合并，不能直接 cherry-pick。**
+
+**刻意没移植的**：`a5d160e`「网关档下线」—— 它正面删除记忆模型来源里的 `gateway` 档，
+与本 fork 的前提直接矛盾。
+
+---
+
+### 刻意没改的
 
 - `appId` / `productName` 保持 `com.huidada1.agenthub` / `AgentHub` —— 数据目录 `%APPDATA%\AgentHub`
   与上游连续，号池 / 记忆库 / 用量数据直接继承，不用迁移。
 - 全部源文件的版权头与 `LICENSE` 原样保留 —— 见第七节。
-- `electron/backend/proxy/` 与 `gateway/` —— 上游 v1.82.2 的代码，**一行未改**，保证网关行为与上游 v1.82.2 完全一致。
+- `electron/backend/proxy/` 与 `gateway/` —— 上游 v1.82.2 的代码，**一行未改**（移植三个提交
+  也没碰它们），保证网关行为与上游 v1.82.2 完全一致。
 
 ---
 
@@ -254,13 +283,19 @@ gh workflow run release.yml --repo yangwenjie1231/AgentHub
 | `a5d160e` 网关档下线，模型来源收敛 | 把记忆中枢模型来源里的 `gateway` 档位删掉，与本 fork 的前提直接冲突 |
 | `05b4b03` v1.83.0 发版 | 号池管家改造的版本号与发版说明 |
 
-### 可考虑的提交（与网关正交，需人工过一遍）
+### 已移植的提交
 
-| commit | 内容 | 评估 |
-| --- | --- | --- |
-| `58927fd` | 优化计费规则 | 计费模块与网关正交，优先跟进 |
-| `a38940d` | 三套在线价格表同构卡片 | 同上；数据层 schema 升到 10，与 `bbe8373` 的 newapi 来源有重叠 |
-| `437afbd` | 模型与网关迁入全局设置，路由链独立成面板 | **与网关相关**，动的是「模型与网关」设置面板，合并后要逐项确认网关档位仍在 |
+`58927fd`（优化计费规则）、`437afbd`（模型与网关迁入全局设置）、
+`a38940d`（三套在线价格表同构卡片）—— 三个都已落地并通过全部自测，
+详见第四节「从上游移植的三个提交」。
+
+### 判一个上游提交该不该 SKIP 的三条判据
+
+命中**任意一条** → SKIP：
+
+1. 提交是否删除 `models.sourceOrder` 里的 `"gateway"`？
+2. 提交是否删除 `ConfigModelsSection.vue` 的网关档 UI？
+3. 提交是否删除 `electron/preload.cjs` 的 `proxy_*` 白名单？
 
 ### 同步操作
 
@@ -273,6 +308,16 @@ git cherry-pick <commit>                        # 单个提交，不做 merge
 
 **纪律**：不要把上游 `main` 合进来。上游 `main` 与本 fork 的差异不是「落后多少」，
 而是**两个产品**——上游的 1.83+ 砍掉了网关，合进来等于自杀。
+
+**另外两条移植纪律**：
+
+- **`src/types/index.ts` 是雷区**。上游在 `fdb3e55` 里给 `SettingsTab` 加了 `"models"`，
+  我们回滚后自己补回（见第四节）。上游后续若再动这个联合类型，需手工合并。
+- **schema 迁移链必须逐级对齐**。本 fork 与上游同处 9 → 10 的迁移点（纯视图重建，
+  不改表结构，无断层）。上游若再升 schema，迁移块是 `if (current < N)` 逐级追加，
+  **本 fork 必须保持同样的逐级链**，否则跨版本数据库会跳过中间步骤。
+  迁移只升不降：回退到旧代码时 `user_version` 不会自动降级（对本 fork 无害，
+  视图结构兼容），但**不要在同一台机器上反复切换 schema 版本不同的构建**。
 
 ---
 
@@ -343,16 +388,30 @@ npm run verify:memory  # 记忆中枢纯代码验证
 > （`~/AgentHub/memory/projects/_index.json`），没有就会跳过；它是手动脚本，不在
 > `npm run verify:memory` 里。
 
-### 回退基线的实测结果
+### 回退基线与移植后的实测结果
 
 回退基线 `bbe8373` 上的网关自测**全部通过**（11/11，闭包断言通过）：
 适配器契约 18 渠道、渠道自测 56 项、故障转移全场景、成本档路由 30 项、
 空池路由 31 项、加密信封 18 项、Key LWW 17 项、ModelScope 31 项等。
 
+移植三个上游提交后（当前 `main`）复测，**全部仍然通过、无回归**：
+`vue-tsc --noEmit` exit 0 · `vite build` exit 0 · 计费自测 65/0 ·
+记忆供应商自测 66/0 · `verify:memory` 26/0 · 网关闭包 145 文件完整 ·
+代理命令表 8/0（82 条命令）· 网关自测 11/11。
+
+网关完整性复核（移植后）：`electron/backend/proxy/` 43 个模块 ·
+`src/views/proxy/` 16 个视图 · `gateway/` Docker 形态完整 ·
+`DEFAULT_SOURCE_ORDER = ["custom", "degrade", "gateway"]`（**网关档仍在**）·
+preload 白名单 82 条 `proxy_*` 命令完整。
+
 ---
 
 ## 十、已知坑
 
+0. **`src/types/index.ts` 的 `SettingsTab`**（移植上游提交时的头号坑）。
+   上游 `437afbd` 依赖 `fdb3e55` 引入的 `"models"` 页签，cherry-pick 不会带过来 →
+   9 条 TS 错误 + 设置弹窗不渲染「模型与网关」页签（面板静默不可达）。
+   本 fork 已手工补齐；上游后续若再动这个联合类型，**必须手工合并**。
 1. **自动更新源**（最要命）。改了 `updater.cjs` 的 `GITHUB_REPO_URL` 但忘了改
    `package.json` 的 `build.publish.owner`，或反之——`app-update.yml` 与便携版的
    `latest.yml` 直链是两条独立路径，**两处都要改**。
