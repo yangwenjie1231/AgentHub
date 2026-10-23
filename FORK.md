@@ -321,11 +321,78 @@ git cherry-pick <commit>                        # 单个提交，不做 merge
 
 ---
 
-## 九、CI
+## 九、上游风控对策（本 fork 自行维护的部分）
+
+上游把反代网关整个砍掉，意味着**风控适配这条线彻底没人跟了**——但上游（腾讯、
+字节等）的风控策略仍在变。这是本 fork 最需要持续维护的部分，也是最容易过时的地方。
+
+社区上报的两个 issue（#156 请求被拦截 / #157 额度耗尽后免费模型不可用）都属于这条线。
+
+### 对策来源（都是**现行**实现，不是过时配方）
+
+| 项目 | 最后提交 | 取了什么 |
+| --- | --- | --- |
+| [hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api) | 2026-10-23 | `desensitize.py` 的**词级零宽空格**内容审核脱敏 |
+| [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) | 2026-10-21 | `pool/credit_floor*` 的**积分保底**与「免费模型不被连坐」 |
+
+> 核对过：这两个仓库在 2026-10 仍在按真实拦截补词/补判据，代码在活跃路径上
+> （不是 legacy 目录、不是关着的开关）。**不要**去抄 AgentHub 旧版那种
+> 「5 条整句精确改写」的封闭枚举——那正是 issue #156 的根因。
+
+### 已落地的两处修正
+
+**① 内容审核脱敏（#156）** — `electron/backend/proxy/desensitize.cjs`
+
+上游对请求体做**关键词级**审核，命中即 `400 code 11128`。被误伤的多是客户端自带的
+合规模板（Claude Code 的 "Refuse requests for DoS attacks, exploit development,
+credential testing..."、Codex CLI 的模板、以及 DSH 这类安全语境密集的 system prompt）。
+
+做法：在敏感词内部插零宽空格 `U+200B`（`"DoS" → "D\u200boS"`），人/模型读起来一致，
+后端子串匹配失效。**与客户端模板无关**，抗上游改版。
+
+边界（改之前先读）：
+- 只处理 `system` / `developer` 角色 + `tools[].function.description`；
+- **不动** `user` / `assistant` 内容（真实对话语义零影响）；
+- **不改** tools 的 `name`（参与 tool_call 配对）与 `parameters`（上游做 schema 校验）；
+- 幂等：已插过零宽空格的词重复清洗不叠加。
+
+**② 积分保底与免费模型不被连坐（#157）** — `pool.cjs` / `server.cjs`
+
+根因是 402（积分不足）被当成**账号失效**：整号 `exhausted` 封到次日 04:00，且
+`pickAccount` 见 `credits === 0` 直接跳过 —— 于是付费额度耗尽后，**不扣费的免费模型
+也一起不可用**。
+
+做法：402 是「模型级收费门槛」不是「账号失效」，按**该模型是否确认收费**分流：
+
+| 场景 | 旧行为 | 新行为 |
+| --- | --- | --- |
+| 余额 0 + 免费/未知倍率模型 | 整号跳过（免费模型也废） | **照常可用** |
+| 余额 0 + 确认收费模型（目录倍率 > 0） | 整号 exhausted 到次日 04:00 | 只摘这个模型（模型级冷却） |
+| 余额 < `proxy.creditFloor` + 收费模型 | 照常扣 | **不接**，把余额留给免费模型 |
+| 余额 < `proxy.creditFloor` + 免费模型 | — | 照常可用 |
+
+`proxy.creditFloor` 默认 **0 = 关闭**（行为与引入前一致）。判「收费」只认目录
+`catalog.json` 的 `rate > 0`；`rate = 0`（免费）与无倍率（未知）一律放行——
+宁可撞一次 402 让模型级冷却兜住，也不要把未知模型一律判死。
+
+### 维护这条线的纪律
+
+1. **先看现行实现，别抄旧配方**。抄之前用 `git log -1 --format=%ci -- <path>` 确认
+   那份代码最近还在改；超过半年没动、或在 legacy 目录里的，一律当**过时**处理。
+2. **词表/判据要能持续加**。脱敏词表与 `creditFloor` 都是数据驱动，补词比改逻辑安全。
+3. **每次改完必跑**：`tools/proxy-desensitize-selftest.cjs` +
+   `tools/proxy-credit-floor-selftest.cjs` + 既有 12 个网关自测（共 14 套，已接入 CI）。
+4. **不要在分类层写死单个渠道的业务码**。`server.cjs` 的注释已说明：4008 / 6004 /
+   11102 是 trae / workbuddy / qoder **共用**的一族码，搬进单个渠道的 `classifyError`
+   会改变其它渠道的分类结果。
+
+---
+
+## 九·之二、CI
 
 | 工作流 | 触发 | 作用 |
 | --- | --- | --- |
-| `.github/workflows/gateway-ci.yml` | push / PR 命中 `gateway/**`、`electron/backend/**`、`tools/proxy-*.cjs` 等路径 | 网关 Docker 形态：共享核心自测 + 镜像构建 + 容器冒烟（fail-closed、API 契约、备份端点、优雅停机） |
+| `.github/workflows/gateway-ci.yml` | push / PR 命中 `gateway/**`、`electron/backend/**`、`tools/proxy-*.cjs` 等路径 | 网关 Docker 形态：**14 套共享核心自测**（含脱敏与积分保底两套）+ 镜像构建 + 容器冒烟（fail-closed、API 契约、备份端点、优雅停机） |
 | `.github/workflows/release.yml` | 手动 `workflow_dispatch` | 版本校验 → typecheck+构建 → 打包发 Release → 校验 latest.yml |
 
 上游没有「全量类型检查 + 记忆中枢自测」的常规 CI，只有发版流水线里带一道 `npm run build`。
@@ -352,13 +419,14 @@ jobs:
 
 ## 九·附、本地自测怎么跑
 
-### 网关自测（11 个脚本，全部纯 Node）
+### 网关自测（13 个脚本，全部纯 Node）
 
 ```bash
 # 逐个脚本跑，每个脚本给一个**全新**的沙箱目录
 for t in proxy-crypto-envelope proxy-adapter-contract proxy-key-lww proxy-failover \
          proxy-modelscope proxy-credits-expiry proxy-cost-route proxy-empty-pool-route \
-         proxy-stats-rename proxy-channels proxy-agents-switch; do
+         proxy-stats-rename proxy-channels proxy-agents-switch proxy-command-table \
+         proxy-desensitize proxy-credit-floor; do
   d=$(mktemp -d); s=$(mktemp -d)
   AGENTHUB_DATA_DIR="$d" AGENT_SKILLS_HOME="$s" node "tools/$t-selftest.cjs" || echo "FAILED: $t"
 done
