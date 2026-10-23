@@ -349,23 +349,57 @@ git cherry-pick <commit>                        # 单个提交，不做 merge
 
 | 项目 | 最后提交 | 取了什么 |
 | --- | --- | --- |
-| [hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api) | 2026-10-23 | `desensitize.py` 的**词级零宽空格**内容审核脱敏 |
+| [hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api) | 2026-10-23 | `desensitize.py` 的**词级零宽空格** + `PR #4` 的**harness 语义压缩** |
 | [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) | 2026-10-21 | `pool/credit_floor*` 的**积分保底**与「免费模型不被连坐」 |
+| [Ebony-Vinyl/dsh-our-free-model](https://github.com/Ebony-Vinyl/dsh-our-free-model) issue #544 / #568 / #570 / #603 | 2026-10-22 ~ 10-23 | **11128 判定语义的实测测绘**（12 组探针、三条指纹、双端点对照） |
 
-> 核对过：这两个仓库在 2026-10 仍在按真实拦截补词/补判据，代码在活跃路径上
+> 核对过：这些仓库/issue 在 2026-10 仍在按真实拦截补词、补判据，代码在活跃路径上
 > （不是 legacy 目录、不是关着的开关）。**不要**去抄 AgentHub 旧版那种
 > 「5 条整句精确改写」的封闭枚举——那正是 issue #156 的根因。
+
+### 11128 到底在查什么（#603 实测，先读懂再动手）
+
+| 实测项 | 结论 |
+| --- | --- |
+| 检查范围 | **所有非 user 消息**：system 提示词 + 回传的 **assistant 历史** |
+| 匹配语义 | 大小写不敏感的**逐字符字面量子串比对**（不是关键词、不是语义） |
+| 不查的位置 | `user` / `tool` / `reasoning_content` / `tool_call.arguments` |
+| 长度因素 | 7000 字符中性填充文本 → 200，**排除长度** |
+| 双端点 | `copilot.tencent.com` 与 `www.workbuddy.ai` 表现**完全一致** |
+| 账号因素 | 同 body 换号即 200，同号换任何 body 仍 400 —— **与账号无关** |
+
+三条指纹的锚定规则**各不相同**，这是最容易踩的坑：
+
+| 指纹 | 内容 | 锚定 |
+| --- | --- | --- |
+| A | `You are an AI agent powered by DeepSeek Harness.` | **开头锚定**（前面有任意字符即失效，含前导空格） |
+| B | `Main branch (you will usually use this for PRs)` | 任意位置 |
+| C | Web GUI 两连句（221 字符） | 任意位置，**必须紧邻连续**（换行/换序/去引号都破坏匹配） |
+
+**关键推论**：`assistant` 历史同样被查。一旦某轮回复复述过指纹句，它进入上下文后
+**该会话之后每一轮都会挂**，与用户输入无关。所以清洗必须覆盖 assistant，
+只洗 system 是修不干净的（#544 的原始方案就是这个漏点）。
 
 ### 已落地的两处修正
 
 **① 内容审核脱敏（#156）** — `electron/backend/proxy/desensitize.cjs`
 
-上游对请求体做**关键词级**审核，命中即 `400 code 11128`。被误伤的多是客户端自带的
-合规模板（Claude Code 的 "Refuse requests for DoS attacks, exploit development,
-credential testing..."、Codex CLI 的模板、以及 DSH 这类安全语境密集的 system prompt）。
+四层管线，**顺序即优先级**（`desensitizeTemplateText` 串起来，prune/compact 可关）：
 
-做法：在敏感词内部插零宽空格 `U+200B`（`"DoS" → "D\u200boS"`），人/模型读起来一致，
-后端子串匹配失效。**与客户端模板无关**，抗上游改版。
+| 层 | 做什么 | 依据 |
+| --- | --- | --- |
+| ① 身份指纹整段改写 | `CLIENT_FINGERPRINTS` 表：A / 品牌名 / C / B 逐条换成中性说法 | #603 三条指纹 + 评论确认的品牌名根因 |
+| ② 运行时元数据裁剪 | `environment_context` 等 5 类成对标签整段换一句话；ToolSearch / Agent 工具清单 / MCP 三类尾部截断 | workbuddy2api `_prune_runtime_fragments` |
+| ③ harness 语义压缩 | system + 长度 ≥1000 + Claude 标记命中 ≥2 → 换成行为契约摘要 | workbuddy2api `PR #4` |
+| ④ 词级零宽空格 | `DoS` → `D\u200boS`，兜底散词 | workbuddy2api `desensitize.py` |
+
+**为什么不能只靠 ④**：workbuddy2api 的实证原话是「CodeBuddy's channel review rejects
+that whole block **even after individual terms are split with zero-width spaces**,
+so it needs semantic compaction instead」——整块模板会被拒，拆词无效。
+
+**①的应用顺序有坑**：按 `from` 长度**降序**落。C 的 221 字符里含品牌名
+`DeepSeek Harness`，若品牌名规则先跑会把 C 改花，整段规则再也匹配不上，
+留下半改写状态（引号没去掉，字面量仍可能被认出）。这个 bug 是自测抓出来的。
 
 边界（改之前先读）：
 - 只处理 `system` / `developer` 角色 + `tools[].function.description`；
@@ -392,6 +426,36 @@ credential testing..."、Codex CLI 的模板、以及 DSH 这类安全语境密�
 `catalog.json` 的 `rate > 0`；`rate = 0`（免费）与无倍率（未知）一律放行——
 宁可撞一次 402 让模型级冷却兜住，也不要把未知模型一律判死。
 
+### 被 11128 拦住时怎么定位（排障指引）
+
+先分清是**哪一条路径**——两者的 `msg` 不同，处理方式完全相反：
+
+| 上游 `msg` | 含义 | 正确处理 |
+| --- | --- | --- |
+| `request illegal` | **内容审核**（指纹/敏感词命中） | 走脱敏四层管线；与账号无关，**不要换号、不要罚号** |
+| `Illegal API invocation from an unapproved channel` | **渠道资格校验**（客户端指纹） | 属渠道级，换号照拦；如实报错 + 渠道短退避 |
+
+AgentHub 侧 `server.cjs` 的 `isChannelBlock()` 按 `code === 11128` 判渠道级、
+`isClientGate()` 按正文文本判资格校验，两条都**不罚账号**（`applyCool` 无对应分支），
+这一点是对的——内容审核换号确实无效。
+
+定位是哪一条指纹，用 `listFingerprintHits`：
+
+```bash
+node -e "
+const d = require('./electron/backend/proxy/desensitize.cjs');
+const s = require('fs').readFileSync(process.argv[1], 'utf8');
+console.log('命中指纹:', d.listFingerprintHits(s));
+console.log('命中敏感词数:', d.countHits(s));
+" <被拦的请求体或 system prompt 文本>
+```
+
+**一条都没命中却仍被拦**，说明是未列入的第四条指纹。按 #603 的探针法定位：
+把 system 原文**二分**，只留一半发给上游，缩到最小触发片段；再把该片段从
+`system` 挪到 `user` 验证（不拦即确认是非 user 消息的字面量检查）。
+定位后往 `CLIENT_FINGERPRINTS` 加一行（**长的放前面**，见上面的顺序坑），
+并往自测加一条用例。
+
 ### 维护这条线的纪律
 
 1. **先看现行实现，别抄旧配方**。抄之前用 `git log -1 --format=%ci -- <path>` 确认
@@ -402,6 +466,10 @@ credential testing..."、Codex CLI 的模板、以及 DSH 这类安全语境密�
 4. **不要在分类层写死单个渠道的业务码**。`server.cjs` 的注释已说明：4008 / 6004 /
    11102 是 trae / workbuddy / qoder **共用**的一族码，搬进单个渠道的 `classifyError`
    会改变其它渠道的分类结果。
+5. **改 `CLIENT_FINGERPRINTS` 后必验顺序**。长指纹必须先落，否则短规则会把长规则的
+   原文改花。自测第 11 组有条顺序回归用例，别删。
+6. **不要扩大清洗范围到 user**。#603 实测 user / tool 不拦，洗了纯属白改用户正文与代码，
+   还会打乱前缀缓存。要扩范围先拿探针数据说话。
 
 ---
 
