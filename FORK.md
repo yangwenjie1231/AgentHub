@@ -2,6 +2,22 @@
 
 > 本文件是本仓库（`yangwenjie1231/AgentHub`）的维护说明。
 > 上游是 [HUIdada1/AgentHub](https://github.com/HUIdada1/AgentHub)，原作者沐晖（HUIdada1）。
+>
+> **AI agent 请先读 [AGENTS.md](./AGENTS.md)**（入口索引 + 硬性约束），再回到本文查细节。
+
+## 快速导航
+
+| 我要… | 看这节 |
+| --- | --- |
+| 知道为什么回退、基线是哪个 commit | 一、二 |
+| 推代码 / 看远程拓扑 | 三 |
+| 知道本 fork 改了什么、移植了什么 | 四 |
+| 定版本号 / 发版 | 五、六 |
+| **确认能不能这么用（授权）** | **七（必读）** |
+| 跟进上游（哪些能 cherry-pick、哪些必须 SKIP） | 八 |
+| **修上游风控相关的问题** | **九** |
+| 跑自测 / 看 CI | 十、十一 |
+| 排坑 | 十二 |
 
 ---
 
@@ -107,6 +123,7 @@ fork 仓库当前状态：
 | `.github/workflows/release.yml` | 两处硬编码仓库 URL → 本 fork | tag 校验与 latest.yml 校验都指向本 fork |
 | `tools/verify-project-regroup-e2e.cjs` | 断言放宽为「仓库族」 | 项目身份取自 `origin`，本 fork 的 origin 变了，钉死上游地址会误报失败 |
 | `README.md` / `README.en.md` | 加 fork 声明；下载与 clone 链接指向本 fork | 避免用户从上游页面下到没有反代网关的版本 |
+| `AGENTS.md` / `CLAUDE.md` | 新增（agent 入口索引；`CLAUDE.md` 是 `@AGENTS.md` 转发） | 让 AI agent 一进仓库就知道这是 fork、必读本文件、以及硬性约束（授权 / 不 merge 上游 / `SettingsTab` 雷区 / 改风控前先验方案新鲜度） |
 | `FORK.md` | 新增 | 本文件 |
 
 ### 从上游移植的三个提交（已落地）
@@ -388,7 +405,7 @@ credential testing..."、Codex CLI 的模板、以及 DSH 这类安全语境密�
 
 ---
 
-## 九·之二、CI
+## 十、CI
 
 | 工作流 | 触发 | 作用 |
 | --- | --- | --- |
@@ -417,7 +434,7 @@ jobs:
 
 ---
 
-## 九·附、本地自测怎么跑
+## 十一、本地自测怎么跑
 
 ### 网关自测（13 个脚本，全部纯 Node）
 
@@ -474,7 +491,7 @@ preload 白名单 82 条 `proxy_*` 命令完整。
 
 ---
 
-## 十、已知坑
+## 十二、已知坑
 
 0. **`src/types/index.ts` 的 `SettingsTab`**（移植上游提交时的头号坑）。
    上游 `437afbd` 依赖 `fdb3e55` 引入的 `"models"` 页签，cherry-pick 不会带过来 →
@@ -499,7 +516,7 @@ preload 白名单 82 条 `proxy_*` 命令完整。
 
 ---
 
-## 十一、致谢与许可
+## 十三、致谢与许可
 
 - 上游项目：[HUIdada1/AgentHub](https://github.com/HUIdada1/AgentHub) —— 作者 沐晖（HUIdada1）
 - 本 fork 保留原仓库全部版权声明与 `LICENSE`（MIT + 附加使用条款）
