@@ -74,6 +74,8 @@ async function main() {
   fs.writeFileSync(locFile, JSON.stringify({ path: dir }));
   try {
     const rules = require("../electron/backend/proxy/rules.cjs");
+    // 全新沙箱里 rules/ 还不存在：init() 会把内置默认值落盘，之后才能改 headers.json
+    rules.init();
     const cfgPath = path.join(rules.rulesDir(), "headers.json");
     const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
     // 三个域都指到本地假上游：billingBase（report/streak）、chatUrl（免费模型）、pluginBase
@@ -140,6 +142,24 @@ async function main() {
     const bad = await ad.dailyActivity(account, secrets);
     assert(bad && bad.ok === false && bad.report && bad.poke && bad.web, "全失败时返回结构化结果（不抛）");
     assert(typeof bad.message === "string" && bad.message.includes("失败"), "全失败文案如实报错");
+
+    // ---- ④ 门槷回归：加油包领不到，每日活跃也必须跑 ----
+    // 加油包是一次性 trial 端点，领过或下线后必然返回失败。若 dailyActivity 以
+    // trial 成败为门槛，领不到加油包的账号就永远拿不到「免费模型对话」这条
+    // 每日积分主通道——用户反馈的实证。这里用源码断言把这个门槛钉住。
+    const idxSrc = fs.readFileSync(path.join(__dirname, "..", "electron", "backend", "proxy", "index.cjs"), "utf8");
+    assert(
+      /if \(useAct === "trial" && typeof ad\.dailyActivity === "function"\)/.test(idxSrc),
+      "dailyActivity 只以「国际版 trial 动作」为门槛，不看 trial 成败"
+    );
+    assert(
+      !/r\.ok !== false && typeof ad\.dailyActivity/.test(idxSrc),
+      "旧的「trial 成功才跑每日活跃」门槛已移除"
+    );
+    assert(
+      /if \(r\.ok === false && da && da\.ok\) r\.ok = true;/.test(idxSrc),
+      "加油包失败但活跃通道走通时，本次动作判成功（主通道不被 trial 埋掉）"
+    );
   } finally {
     server.close();
     if (prevLoc === null) fs.rmSync(locFile, { force: true });

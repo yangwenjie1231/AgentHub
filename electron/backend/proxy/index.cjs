@@ -269,11 +269,17 @@ async function checkinBatch({ channel, accountId, action, interactive }) {
         // 放在 trial 之后：领完加油包顺手把「今日活跃」做掉，用户点一次就完整跑一遍。
         // 纯 best-effort：失败只拼进 message，绝不把 trial 的 ok 翻成失败（活动开关在上游手里，
         // 关掉活动不该让整个定时签到报错）。status/桌面端不触发，避免只查状态就写上游。
-        if (useAct === "trial" && r && r.ok !== false && typeof ad.dailyActivity === "function") {
+        // ⚠ 门槛**不能**挂在 trial 成败上：加油包是一次性 trial 端点，领过或下线后必然返回
+        // 失败，而「免费模型对话」才是每日积分的主通道。以 trial 成败做门槛，会让领不到
+        // 加油包的账号连带拿不到每日积分——这正是用户反馈「没有办法领加油包」时的实证。
+        if (useAct === "trial" && typeof ad.dailyActivity === "function") {
           try {
             const da = await ad.dailyActivity(acc, secrets);
             r.dailyActivity = da;
             if (da && da.message) r.message = `${r.message || ""}${r.message ? " · " : ""}每日活跃：${da.message}`.slice(0, 400);
+            // 加油包领不到，但三条活跃通道走通了 → 本次动作算成功。
+            // 每日积分就是这么发的，让 trial 的失败定生死会直接把主通道埋掉
+            if (r.ok === false && da && da.ok) r.ok = true;
           } catch (e) {
             r.dailyActivity = { ok: false, message: String((e && e.message) || e) };
           }

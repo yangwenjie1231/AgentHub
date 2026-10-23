@@ -72,6 +72,8 @@ jobs:
           run_sbx tools/proxy-desensitize-selftest.cjs
           # 积分保底与免费模型不被连坐（issue #157）：倍率判定、保底阈值、号码池选取行为
           run_sbx tools/proxy-credit-floor-selftest.cjs
+          # WorkBuddy 国际版每日活跃三条通道 + 「加油包领不到也要跑免费模型对话」门槷回归
+          run_sbx tools/proxy-workbuddy-activity-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest
