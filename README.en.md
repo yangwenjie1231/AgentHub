@@ -9,10 +9,11 @@
 </p>
 
 > [!NOTE]
-> **This repository is an independently maintained fork of AgentHub — not the upstream official repository.**
+> **This repository is an independently maintained fork of AgentHub — not the upstream official repository, and not affiliated with or endorsed by the original author.**
 >
-> - Upstream removed the **reverse proxy gateway** section starting with **v1.83.0** (repurposed into "account pool manager"). This branch is rolled back to **v1.82.2**, the last version that still ships the complete gateway, and is maintained from there.
+> - Upstream moved the **reverse proxy gateway** section into a ceased-maintenance state starting with **v1.83.0** (repurposed into "account pool manager"). Upstream's stated reason: the module was a personal-use project, the author lacks the capacity for long-term protocol adaptation and risk-control counter-adaptation, and upstream policy churn has made the stability and usable lifetime of the forwarding channel uncontrollable. This branch is rolled back to **v1.82.2**, the last version that still ships the complete gateway, and is **maintained independently** from there. This does not constitute a criticism of upstream's maintenance decision.
 > - Code and copyright remain with the original author, [HUIdada1/AgentHub](https://github.com/HUIdada1/AgentHub), under the original LICENSE (MIT + additional terms, including a **non-commercial use** requirement). This fork is non-commercial only; all copyright notices and license terms are retained.
+> - **Risk notice** (carried over from upstream): the forwarding channel may become unavailable at any time due to upstream policy changes; users bear full responsibility for account risk control, restrictions or bans arising from the use of unofficial clients. The license's additional terms also **prohibit bulk account operations** and **bypassing upstream billing and quotas**.
 > - Rationale, differences from upstream, versioning rules and upstream-sync workflow: see [FORK.md](./FORK.md).
 
 > Four things — skills, usage, quota and memory — pulled into one Windows desktop app.
@@ -538,6 +539,13 @@ The project is provided "AS IS", and the author **makes no express or implied wa
 ## Author
 
 **沐晖** (GitHub: [@HUIdada1](https://github.com/HUIdada1))
+
+### About this fork
+
+- This repository is **independently maintained by a community user**. It is not the upstream official repository and has no affiliation with, sponsorship of, or endorsement by the original author.
+- Upstream moved the gateway section into a ceased-maintenance state in v1.83.0 — see the note above and the [upstream v1.83.0 release notes](https://github.com/HUIdada1/AgentHub/releases/tag/v1.83.0). This fork continues to maintain that module independently on top of v1.82.2.
+- The usage notice above and the [LICENSE](./LICENSE) **apply in full to this fork**; the original author's disclaimers bind this fork's users as well.
+- For the official upstream build (without the gateway section) see [HUIdada1/AgentHub Releases](https://github.com/HUIdada1/AgentHub/releases/latest).
 
 ## License
 

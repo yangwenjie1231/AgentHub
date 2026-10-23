@@ -47,8 +47,11 @@
 ## 三、分支与远程拓扑
 
 采用 GitHub 标准 fork 布局：**origin = 自己的 fork，upstream = 上游**。
-（上游代码 `electron/backend/memory/layout.cjs` 的注释已明确按这个拓扑设计：
-「一个仓库常同时挂 origin（自己的 fork）与 upstream（上游）」。）
+
+> 为什么不是「origin 仍指上游、另加一个 fork 远程」：那样 `git pull` 会把**上游的
+> gateway-less main 拉进来**——恰好是要躲的东西。上游代码 `electron/backend/memory/layout.cjs`
+> 的注释已明确按「origin（自己的 fork）+ upstream（上游）」这个拓扑设计：
+> 「一个仓库常同时挂 origin（自己的 fork）与 upstream（上游）」。
 
 ```
 origin    →  https://github.com/yangwenjie1231/AgentHub.git   （本 fork，推送目标）
@@ -59,16 +62,33 @@ upstream  →  https://github.com/HUIdada1/AgentHub.git          （上游，只
 
 | 分支 | 指向 | 用途 |
 | --- | --- | --- |
-| `main` | 回退基线 + 本 fork 的维护提交 | **日常开发分支**，与 fork 的 `main` 一致 |
-| `feat/gateway-maintain` | 回退基线 + 本 fork 的维护提交 | 首次回退的工作分支（与 `main` 同点，可删可留） |
+| `main` | 回退基线 + 本 fork 的维护提交 | **日常开发分支**，与 fork 的 `main` 一致，跟踪 `origin/main` |
 
-首次推送：
+已完成的初始化（实际执行过的命令）：
 
 ```bash
-git remote rename origin upstream          # 原 origin 其实是上游
+git remote rename origin upstream                      # 原 origin 其实指上游
 git remote add origin https://github.com/yangwenjie1231/AgentHub.git
-git push -u origin main
+git checkout -B main feat/gateway-maintain             # 本地 main 移到回退线
+git branch -D feat/gateway-maintain
+git push origin main --force                           # 覆盖 fork 继承来的 main
+git branch --set-upstream-to=origin/main main
 ```
+
+> **为什么要 `--force`**：fork 从上游继承的 `main` 停在 `a5d160e`（v1.85.0，无网关），
+> 而回退线 `bbe8373` 是它的祖先，所以是「回退」而非快进。推的是自己的 fork，
+> 且 `a5d160e` 仍可经 `upstream/main` 取到，历史不会丢。
+
+fork 仓库当前状态：
+
+| 项 | 值 |
+| --- | --- |
+| 仓库 | https://github.com/yangwenjie1231/AgentHub |
+| 可见性 | PUBLIC（GitHub 网络内的真 fork，parent = `HUIdada1/AgentHub`） |
+| 默认分支 | `main` → 已指向本回退线 |
+| 仓库描述 | 已标注「非官方 fork / 自行维护 / 非商业 / 同款授权」 |
+| homepage | 指向上游仓库 |
+| Issues / Wiki | 已开启 |
 
 ---
 
@@ -167,10 +187,58 @@ gh workflow run release.yml --repo yangwenjie1231/AgentHub
 4. **超出上述范围**（尤其是商业化、或作者就「直接搬运」另作限制的解读），
    需事先联系原作者取得书面授权。
 
-> 上游源文件头写有「禁止在未经本人授权的情况下直接搬运本代码」，与 `LICENSE` 授予的
-> 发布/分发权存在措辞张力。`LICENSE` 第三部分写明「如两者表述有出入，以本文件为准」，
-> 故以 `LICENSE` 为准 —— **非商业、保留署名** 的 fork 落在授权范围内；
-> 任何商业化或大规模再分发都应先取得作者书面许可。
+> **第二层限制：源文件头的「直接搬运」条款。**
+> 上游 437 个源文件（fork 中 455 个）顶部都带这段：
+>
+> ```
+>  *  版权声明：本代码归沐晖所有。
+>  *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+>  *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+>  *    此注释为版权与授权声明，禁止删除。
+> ```
+>
+> 其中「禁止在未经本人授权的情况下**直接搬运**本代码（含复制、转载、用于商业项目）」
+> 比 LICENSE 附加条款 2（只禁「牟利」型二次分发）**更严格**——它把复制/转载也列了进去，
+> 没有附带「牟利」限定。
+>
+> **本 fork 的立场**：「直接搬运」指向的是**不署名、逐字照搬的原文转载**，
+> 而非「保留全部版权声明与授权条款、注明出处、非商业的再分发」。
+> 依据有三：① 文件头本身要求「禁止删除」版权声明——真要禁止署名式 fork 不会这么写；
+> ② LICENSE 第三部分写明「如两者表述有出入，**以本文件为准**」，而 LICENSE 明确授予
+> 「发布、分发」权；③ 附加条款 1/2 禁的是**商业用途**与**牟利型再分发**，
+> 本 fork 两者都不涉及。
+>
+> **但作者的沉默不等于许可。** 时间线值得注意：
+>
+> | 时间 | 事件 |
+> | --- | --- |
+> | 2026-10-15 14:00 | `b468e84e` LICENSE 改为「MIT + 附加使用条款」复合授权 |
+> | 2026-10-22 01:37 | `2b080de` 批量给源文件补版权头（8 → 453 个文件） |
+> | 2026-10-22 14:55 | `fdb3e55` 下线反代网关 |
+> | 2026-10-22 15:01 | 发布 v1.83.0 |
+>
+> 一天之内「先硬化授权 → 再给每个文件加头 → 再下线网关」，这在时序上**不能证明**文件头
+> 就是针对这种恢复而设，但也意味着不能把作者的沉默当作默许。
+>
+> **建议（成本极低、未执行）**：向上游作者发一条**事实告知**（不是请求许可），
+> 说明本 fork 的存在、基线 commit、非商业性质与保留全部声明的事实。
+> 这能把唯一可争议的那一条从「单方判断」变成「已知情且未反对」。
+> 上游留有 QQ 群 `110336924` 与 `SPONSOR.md` 的商务合作渠道；
+> 本 fork 的「反馈与需求」入口也已指向其 issue 模板。**是否发、发什么，由维护者定。**
+
+### 合规自查清单
+
+| # | 要求 | 本 fork 现状 |
+| --- | --- | --- |
+| 1 | `LICENSE` 与上游**逐字节一致**（blob `453c6113`），不得改写、不得只保留 MIT 一半 | ✅ 未改动 |
+| 2 | 全部源文件版权头**原样保留**（455 个文件） | ✅ 未改动 |
+| 3 | 非商业：不做付费镜像 / 卖安装包 / 广告 / 赞助分成 / 商业交付 | ✅ 需持续自律 |
+| 4 | 不标注为「纯 MIT」，不重新授权 | ✅ README 与仓库描述均写明「MIT + 附加使用条款」 |
+| 5 | 不用于批量账号运营、不绕过上游计费与配额 | ✅ README「使用声明」与 LICENSE 原文已覆盖 |
+| 6 | 沿用上游的风险免责声明 | ✅ README 顶部提示 + 「使用声明」第二节原文保留 |
+| 7 | 声明非官方、无隶属与背书关系 | ✅ README 顶部 + 「本 fork 说明」+ 仓库描述 |
+| 8 | 如实转述上游下线网关的**理由**，不歪曲为「上游错了」 | ✅ README 顶部按上游原意转述 |
+| 9 | 指向上游官方版本入口（偏好官方构建的用户） | ✅ README「本 fork 说明」已给上游 Releases 链接 |
 
 ---
 
