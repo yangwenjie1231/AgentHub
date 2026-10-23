@@ -11,40 +11,32 @@
 /**
  * 反代网关 · 上游内容审核脱敏（WorkBuddy 系，issue #156）
  *
- * 背景
- * ----
- * WorkBuddy / CodeBuddy 后端（copilot.tencent.com / codebuddy.cn）对请求体做**关键词级**
- * 内容审核，命中即 400 code 11128（"请求被拦截"）。被误伤的绝大多数不是用户输入，而是
- * **客户端自带 system 模板里的合规声明**：
- *   · Claude Code 的 "Refuse requests for DoS attacks, exploit development, credential testing..."
- *     —— 这是「拒绝作恶」的声明，却被判成敏感词；
- *   · Codex CLI 的 system 模板同理；
- *   · 任何自带安全术语密集 system prompt 的 Harness（如 DSH）都会被大面积误伤——
- *     这正是 issue #156 里「DSH 的话改一下系统提示词」所指的现象。
+ * 三层防护，按序施加（顺序即优先级）：
  *
- * 旧实现的问题（必须替换掉）
- * ------------------------
- * 旧方案是 wb_template_map.json 里的 **5 条整句精确改写**（Claude Code / Codex CLI 的身份句）。
- * 它是封闭枚举：上游每加一条指纹、每换一版客户端模板、或换成别家 Harness，就全部失效，
- * 表现为「明明账号好的，请求就是被拦」。这属于典型的**已过时的解决方法**。
+ *   ① 客户端身份指纹整段改写（CLIENT_FINGERPRINTS）
+ *      上游对**非 user 消息**做「逐字符字面量子串比对」，命中即 400/11128。
+ *      社区实测（dsh-our-free-model #544/#568/#570/#603，2026-10）确认三条指纹，
+ *      且**锚定规则各不相同**：A 开头锚定、B/C 任意位置。实测还确认
+ *      `assistant` 历史正文同样被查 —— 一旦某轮回复复述过这些句子，该会话
+ *      之后每一轮都会挂。故本层改写必须覆盖 system 与 assistant 两种角色。
  *
- * 现行方案（对齐 workbuddy2api 的 desensitize.py，2026-10 仍在维护）
- * --------------------------------------------------------------
- * 对**敏感词表**里的词做轻量处理：在词内部插入零宽空格 U+200B
+ *   ② 运行时元数据裁剪（pruneRuntimeFragments）
+ *      `<environment_context>` / `<permissions instructions>` / `<skills_instructions>`
+ *      这类大段运行时块是模板主体，逐词拆零宽空格救不回来，整段换成一句话。
  *
- *     "DoS" -> "Do\u200bS"        人/模型读起来完全一致
- *     后端的关键词匹配（子串比对）因此失效
+ *   ③ 超长 harness 模板语义压缩（compactHarnessMessage）
+ *      workbuddy2api 的实证结论（PR #4 "Fix claude"，2026-08-22）：
+ *      「CodeBuddy's channel review rejects that whole block **even after individual
+ *      terms are split with zero-width spaces**, so it needs semantic compaction instead.」
+ *      即整块模板会被拒，拆词无效 —— 只能整块换成一句行为契约摘要。
  *
- * 这是词级、可枚举、与模板无关的做法，抗上游改版能力强于整句改写；且不触碰用户真实输入，
- * 只作用于 system / developer 这类「客户端模板集中地」。
+ *   ④ 词级零宽空格（desensitizeText，原有）
+ *      兜底单句里的散词：`DoS` → `Do\u200bS`。人/模型读起来一致，子串匹配失效。
  *
- * 设计约束
- * --------
- * · 只处理指定角色（默认 system / developer）与工具定义文本，**不改用户与助手内容**——
- *   避免影响真实对话语义与代码。
- * · 幂等：已含零宽空格的词不会重复插；大小写不敏感匹配，按词长降序避免短词先吃掉长词。
- * · 词表必须是「英文术语/品牌词」这类**可安全打断**的词：中文词不做处理
- *   （中文分词边界不同，插零宽空格会让模型读起来割裂）。
+ * 关键取舍：宁放行不误杀。①③ 只认**明确的客户端身份标记**，命中不了就不动；
+ * ④ 的词表全是「拒绝作恶」语境的英文术语与品牌词。**不改 user / tool 内容**，
+ * **不改 tools 的 name 与 parameters 结构**（name 参与 tool_call 配对、
+ * parameters 会被上游 schema 校验，改结构必 400）。
  */
 "use strict";
 
@@ -52,7 +44,238 @@
 const ZWSP = "\u200b";
 
 /**
- * 触发上游审核的「合规声明高频词」。
+ * ① 客户端身份指纹表（整段改写，最可靠的一层）
+ *
+ * 上游做的是**逐字符字面量子串比对**（大小写不敏感）。与 ZWSP 拆词相比，
+ * 整段替换更稳：即使上游把匹配放宽到「忽略空白/引号」，替换后的句子也不再是原文。
+ *
+ * 来源（均为 2026-10 仍在更新的社区实测，非过时配方）：
+ *   · dsh-our-free-model #544（`You are an AI agent powered by DeepSeek Harness.`）
+ *   · dsh-our-free-model #568 / #570（`Main branch (you will usually use this for PRs)`）
+ *   · dsh-our-free-model #603（Web GUI 两连句，221 字符，**必须紧邻连续**才触发）
+ *   · #603 评论（2026-10-23）：「关键是品牌名 DeepSeek Harness」
+ *
+ * 实测判据（#603 的 12 组探针，buddy 与 workbuddy 双端点一致）：
+ *   · 换行 / 换序 / 去引号都会破坏匹配 → 服务端认逐字符子串
+ *   · 指纹放 user / tool / reasoning_content / tool_call.arguments **不拦**
+ *   · 放 system 或 **assistant** 正文**都拦**（assistant 是 #544 漏掉的关键一条）
+ *   · 7000 字符中性填充文本 → 200（排除长度因素）
+ *
+ * 键名刻意取长且专有，避免误伤用户正文。
+ */
+const CLIENT_FINGERPRINTS = [
+  // —— A：开头锚定（前面有任意字符即失效，含前导空格）——
+  {
+    id: "dsh-identity",
+    from: "You are an AI agent powered by DeepSeek Harness.",
+    to: "You are an AI assistant.",
+    note: "#544：DSH 默认 system 首句",
+  },
+  {
+    id: "dsh-identity-nodot",
+    from: "You are an AI agent powered by DeepSeek Harness",
+    to: "You are an AI assistant",
+    note: "A 的无句号变种",
+  },
+  // —— 品牌名：#603 评论确认的根因，独立于 A/C 单独兜一层 ——
+  {
+    id: "dsh-brand",
+    from: "DeepSeek Harness",
+    to: "the agent harness",
+    note: "品牌名本身即指纹；换成中性说法",
+  },
+  // —— C：整段连续字面量，任意位置。去引号改写即可破坏匹配 ——
+  {
+    id: "dsh-web-gui",
+    from: 'You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.',
+    to: "You are interacting with the user through a web interface whose URL the runtime context names. When the user refers to this page, this interface, or this app without naming another target, they mean this interface.",
+    note: "#603：DSH 内核默认 prompt 段，第一次请求就挂",
+  },
+  // —— B：任意位置（wb_template_map.json 里已有等价项，这里再兜一层防用户删表）——
+  {
+    id: "main-branch",
+    from: "Main branch (you will usually use this for PRs)",
+    to: "Default branch (PRs usually go here)",
+    note: "#568 / #570",
+  },
+];
+
+/**
+ * 预编译：按 from 长度降序。长指纹必须先落——C 的 221 字符整段里含品牌名
+ * "DeepSeek Harness"，若品牌名规则先跑，C 的原文就被改花，整段规则再也匹配不上
+ * （实测踩过：结果留下 "through the the agent harness Web GUI ... "this page"" 这种
+ * 半改写状态，引号没去掉，字面量仍可能被认出）。
+ */
+const FINGERPRINT_ORDER = CLIENT_FINGERPRINTS
+  .filter((f) => f && typeof f.from === "string" && f.from)
+  .sort((a, b) => b.from.length - a.from.length);
+
+/** 把 ① 应用到一个文本 blob。无命中原样返回（零拷贝快路径）。 */
+function rewriteFingerprints(text) {
+  if (typeof text !== "string" || !text) return text;
+  let t = text;
+  for (const fp of FINGERPRINT_ORDER) {
+    if (t.indexOf(fp.from) < 0) continue;
+    t = t.split(fp.from).join(fp.to);
+  }
+  return t;
+}
+
+/** 供自测与可观测性：某文本命中了哪些指纹 id */
+function listFingerprintHits(text) {
+  if (typeof text !== "string" || !text) return [];
+  return CLIENT_FINGERPRINTS.filter((fp) => fp.from && text.includes(fp.from)).map((fp) => fp.id);
+}
+
+/**
+ * ② 运行时元数据块裁剪。
+ *
+ * harness 会把 environment / permissions / skills / plugins 的大段运行时说明注入
+ * system（或 developer）消息。这些块是模板主体，逐词拆零宽空格救不回来，整段换一句话。
+ * 只认成对的 XML 式标签，命中不了就完全不动。
+ */
+const RUNTIME_BLOCKS = [
+  ["<environment_context>", "</environment_context>",
+    "Environment context is provided by the harness."],
+  ["<permissions instructions>", "</permissions instructions>",
+    "Runtime permissions apply: filesystem access may be sandboxed, network may be restricted, and some commands may require user approval."],
+  ["<collaboration_mode>", "</collaboration_mode>",
+    "Collaboration mode instructions are provided by the harness."],
+  ["<skills_instructions>", "</skills_instructions>",
+    "Runtime skill metadata is available. Use relevant skills only when explicitly requested or clearly applicable."],
+  ["<plugins_instructions>", "</plugins_instructions>",
+    "Runtime plugin metadata is available when relevant."],
+];
+
+/** 运行时尾部标记：出现即从这里截断，换成一句摘要（这些段纯粹是工具清单，无行为指令） */
+const RUNTIME_TAIL_MARKERS = [
+  "The following deferred tools are now available via ToolSearch.",
+  "Available agent types for the Agent tool:",
+  "## MCP Server Instructions",
+];
+
+function pruneRuntimeFragments(text) {
+  if (typeof text !== "string" || !text) return text;
+  let t = text;
+  for (const [start, end, replacement] of RUNTIME_BLOCKS) {
+    if (t.indexOf(start) < 0) continue;
+    // 非贪婪 + DOTALL 等价：[\s\S]*?；块不存在闭合标签时不动（宁可放过不可错删）
+    const re = new RegExp(
+      "\\s*" + start.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[\\s\\S]*?" + end.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*",
+      "g"
+    );
+    t = t.replace(re, "\n\n" + replacement + "\n\n");
+  }
+  // 尾部截断：取最早命中的标记位置
+  let cut = -1;
+  for (const m of RUNTIME_TAIL_MARKERS) {
+    const i = t.indexOf(m);
+    if (i >= 0 && (cut < 0 || i < cut)) cut = i;
+  }
+  if (cut >= 0) {
+    const head = t.slice(0, cut).replace(/\s+$/, "");
+    t = head ? head + "\n\nRuntime tool, agent, skill, and MCP metadata is available separately." : t;
+  }
+  return t;
+}
+
+/**
+ * ③ 超长 harness 模板语义压缩。
+ *
+ * workbuddy2api 实证（PR #4 "Fix claude"，2026-08-22）：Claude Code 2.x 注入的长模板
+ * 「carries client/channel identity, internal runtime instructions, and tool-environment
+ * metadata」，上游的渠道审核**即使拆了词也拒整块**，只能换成一句行为契约摘要。
+ * 工具 schema 在独立的 `tools` 字段里，不受影响。
+ *
+ * 判据刻意严格：长度 ≥1000 且 ≥2 个标记命中。宁放过不误压 —— 普通长 system prompt
+ * 不会被误判成 harness 模板。
+ */
+const CLAUDE_HARNESS_MARKERS = [
+  "You are an interactive agent that helps users with software engineering tasks.",
+  "# Harness",
+  "# Session-specific guidance",
+  "# Memory",
+  "# Environment",
+  "# Context management",
+];
+const CLAUDE_HARNESS_SUMMARY =
+  "Help with software engineering tasks. Follow repository instructions and runtime permission rules, " +
+  "use available capabilities when needed, and report outcomes accurately. Be precise, helpful, concise, and safe.";
+
+const CODEX_SYSTEM_MARKERS = [
+  "You are a coding agent running in the Codex CLI",
+  "Within this context, Codex refers to",
+  "# How you work",
+];
+
+const PERMISSIONS_MARKERS = [
+  "<permissions instructions>",
+  "Filesystem sandboxing defines which files can be read or written.",
+  "## How to request escalation",
+];
+const SKILLS_MARKERS = ["<skills_instructions>", "### Available skills", "### How to use skills"];
+const HARNESS_USER_MARKERS = ["Project files updated:", "Confirmed edits:"];
+
+function looksLikeClaudeHarness(text) {
+  if (typeof text !== "string" || text.length < 1000) return false;
+  let matched = 0;
+  for (const m of CLAUDE_HARNESS_MARKERS) if (text.includes(m)) matched++;
+  return matched >= 2;
+}
+
+/**
+ * 整块压缩。返回 null = 不压缩（调用方按原文继续走 ④）。
+ * 只对 system 角色的超长模板生效；assistant 历史不整块压（会丢对话内容）。
+ */
+function compactHarnessMessage(role, text) {
+  if (typeof text !== "string" || !text) return null;
+  const r = String(role || "").toLowerCase();
+  if (r !== "system") return null;
+
+  if (looksLikeClaudeHarness(text)) return CLAUDE_HARNESS_SUMMARY;
+  if (CODEX_SYSTEM_MARKERS.some((m) => text.includes(m))) {
+    if (text.includes("You are Claude Code")) {
+      return "You are a coding assistant. Be precise, helpful, concise, and safe. " +
+        "Use available tools when needed, follow repository instructions, and keep the user informed.";
+    }
+    return "You are a coding assistant in Codex CLI. Be precise, helpful, concise, and safe. " +
+      "Use available tools when needed, follow repository instructions, and keep the user informed.";
+  }
+  if (PERMISSIONS_MARKERS.some((m) => text.includes(m))) {
+    return "Runtime permissions apply: filesystem access may be sandboxed, network may be restricted, " +
+      "and some commands may require user approval.";
+  }
+  if (SKILLS_MARKERS.some((m) => text.includes(m))) {
+    return "Runtime skill metadata is available. Use relevant skills only when explicitly requested or clearly applicable.";
+  }
+  return null;
+}
+
+/** 供自测：harness user 注入消息识别（Codex/CLI 会把仓库上下文塞成 user 消息） */
+function looksLikeHarnessUser(text) {
+  if (typeof text !== "string" || !text) return false;
+  return HARNESS_USER_MARKERS.some((m) => text.includes(m));
+}
+
+/**
+ * 对一条「客户端模板集中地」的文本跑完整管线 ①②③④。
+ * 这是 adapters.cjs 的 cleanText 应该调用的入口。
+ */
+function desensitizeTemplateText(text, opts) {
+  const o = opts || {};
+  if (typeof text !== "string" || !text) return text;
+  let t = rewriteFingerprints(text);
+  if (o.prune !== false) t = pruneRuntimeFragments(t);
+  if (o.compact !== false) {
+    const c = compactHarnessMessage(o.role || "system", t);
+    if (c != null) t = c;
+  }
+  t = desensitizeText(t);
+  return t;
+}
+
+/**
+ * ④ 触发上游审核的「合规声明高频词」词表（词级零宽空格兜底）。
  *
  * 来源与取舍：
  *  ① workbuddy2api/desensitize.py 的现行词表（2026-10，作者持续按真实拦截补词）；
@@ -291,10 +514,19 @@ function countHits(text) {
 module.exports = {
   ZWSP,
   SENSITIVE_TERMS,
+  CLIENT_FINGERPRINTS,
+  RUNTIME_BLOCKS,
   desensitizeText,
   desensitizeContent,
   desensitizeMessages,
   desensitizeTools,
+  desensitizeTemplateText,
+  rewriteFingerprints,
+  pruneRuntimeFragments,
+  compactHarnessMessage,
+  looksLikeClaudeHarness,
+  looksLikeHarnessUser,
+  listFingerprintHits,
   countHits,
   DEFAULT_ROLES,
 };

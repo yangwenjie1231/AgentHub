@@ -1303,13 +1303,16 @@ function makeWorkBuddy(channelId) {
         }
         return t;
       };
-      // 文本指纹清洗：模板表逐字替换 → 词级零宽空格脱敏 → header 键值段剥除 → cc_ 裸键值剥除
-      // 词级脱敏是 issue #156 的正式解法：旧实现只有 5 条整句改写，上游一加指纹/一换客户端
-      // 模板就整条失效（表现为「账号是好的，请求就是被 11128 拦」）。词级插入零宽空格
-      // 与客户端模板无关，见 proxy/desensitize.cjs。整句表保留在最前：它的改写对模型更自然。
-      const cleanText = (s) => {
+      // 文本指纹清洗管线（四层，顺序即优先级）：
+      //   整句表 applyTpl → 身份指纹整段改写 → 运行时块裁剪 → harness 语义压缩
+      //   → 词级零宽空格 → header/cc_ 键值段剥除
+      // 依据：dsh-our-free-model #603（2026-10-22，12 组探针实测）确认上游对**非 user
+      // 消息**做逐字符字面量子串比对，且 assistant 历史正文同样被查；workbuddy2api
+      // PR #4（2026-08-22）确认「整块 harness 模板即使拆了词仍被拒，只能语义压缩」。
+      // 详见 proxy/desensitize.cjs 头部注释。
+      const cleanText = (s, role) => {
         let t = applyTpl(s);
-        t = desensitize.desensitizeText(t);
+        t = desensitize.desensitizeTemplateText(t, { role: role || "system" });
         t = t.replace(/x-anthropic-billing-header:[^;\n]*;?\s*/gi, "");
         t = t.replace(/\bcc_[a-z0-9_]+=[^;\n]*;?\s*/gi, "");
         t = t.replace(/x-anthropic-billing-header/gi, "x-anthropic-billing-hdr");
@@ -1342,6 +1345,13 @@ function makeWorkBuddy(channelId) {
         if (m && m.role === "tool" && m.tool_call_id) answeredIds.add(String(m.tool_call_id));
       }
       const merged = [];
+      // 上游审核只查 system 与 assistant（dsh-our-free-model #603 实测：user / tool /
+      // reasoning_content / tool_call.arguments 放原文都不拦）。故这里只洗这两种角色：
+      // 洗 user 会白改用户正文与代码，还会打乱前缀缓存，收益为零。
+      const scrubbable = (role) => {
+        const r = String(role || "").trim().toLowerCase();
+        return r === "system" || r === "assistant";
+      };
       for (const m of repacked) {
         const msg = { ...m };
         // developer 角色归一（上游 role 白名单，命中即 400 code 11128）
@@ -1356,21 +1366,30 @@ function makeWorkBuddy(channelId) {
         for (const k of Object.keys(msg)) {
           if (/^cc_|^x-anthropic-/i.test(k)) delete msg[k];
         }
-        if (typeof msg.content === "string") msg.content = cleanText(msg.content);
-        else if (Array.isArray(msg.content)) {
-          msg.content = msg.content.map((part) =>
-            part && part.type === "text" && typeof part.text === "string" ? { ...part, text: cleanText(part.text) } : part
-          );
-        }
-        // reasoning_content（思维链回填）实测同样携带指纹，与 content 同等清洗
-        if (typeof msg.reasoning_content === "string") msg.reasoning_content = cleanText(msg.reasoning_content);
-        // tool_calls 的 arguments 套同一套文本清洗（JSON 字符串按文本洗，不做键剥离防破坏结构）
-        if (Array.isArray(msg.tool_calls)) {
-          msg.tool_calls = msg.tool_calls.map((tc) =>
-            tc && tc.function && typeof tc.function.arguments === "string"
-              ? { ...tc, function: { ...tc.function, arguments: cleanText(tc.function.arguments) } }
-              : tc
-          );
+        // 内容脱敏只作用于 system / assistant（见 scrubbable 注释）。
+        // 传 role 让 compactHarnessMessage 知道能否整块压缩（仅 system）。
+        if (scrubbable(msg.role)) {
+          if (typeof msg.content === "string") msg.content = cleanText(msg.content, msg.role);
+          else if (Array.isArray(msg.content)) {
+            msg.content = msg.content.map((part) =>
+              part && part.type === "text" && typeof part.text === "string"
+                ? { ...part, text: cleanText(part.text, msg.role) }
+                : part
+            );
+          }
+          // reasoning_content（思维链回填）与 tool_calls.arguments：实测上游不查这两处，
+          // 但 assistant 的思维链常复述 system 模板句，一旦进了下文就是下一轮的指纹来源，
+          // 故仍按同一套洗（幂等，无命中即零改动）
+          if (typeof msg.reasoning_content === "string") {
+            msg.reasoning_content = cleanText(msg.reasoning_content, msg.role);
+          }
+          if (Array.isArray(msg.tool_calls)) {
+            msg.tool_calls = msg.tool_calls.map((tc) =>
+              tc && tc.function && typeof tc.function.arguments === "string"
+                ? { ...tc, function: { ...tc.function, arguments: cleanText(tc.function.arguments, msg.role) } }
+                : tc
+            );
+          }
         }
         // 连续同角色自动合并（role:tool 例外，tool_call_id 必须逐条保留）。
         // array↔array 直接拼接保多模态 part（压扁成文本会丢 image_url），string↔string 用 \n\n；

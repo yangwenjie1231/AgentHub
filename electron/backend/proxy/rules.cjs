@@ -215,6 +215,9 @@ const DEFAULTS = {
   // WorkBuddy 审核指纹最小改写表（from→to 逐字替换；键名要够长防误伤）
   // 对齐 sanitizeRewrites：上游按整句精确匹配拦截（400 code 11-128），
   // 只保留整句形态的改写——禁止短键全局替换（会把用户正文/代码里的普通词组一并改掉）
+  // 注意：客户端身份指纹的权威表现在 proxy/desensitize.cjs 的 CLIENT_FINGERPRINTS
+  // （双端点实测、含 assistant 角色），本表只放「与渠道无关的通用整句」。
+  // 上游新增指纹时优先改 CLIENT_FINGERPRINTS，这里只作兜底。
   "wb_template_map.json": {
     "You are Claude Code, Anthropic's official CLI for Claude": "You are CodeBuddy, an AI coding assistant tool for Claude",
     "You are Claude Code, Anthropic's official CLI.": "You are CodeBuddy, an AI coding assistant.",

@@ -166,8 +166,95 @@ console.log("10. 词表健全性");
     ["DoS", "exploit", "sandbox", "Anthropic"].every((k) => d.SENSITIVE_TERMS.includes(k)));
 }
 
+// ===== 11. 客户端身份指纹（CLIENT_FINGERPRINTS，#603 实测三条 + 品牌名）=====
+console.log("11. 客户端身份指纹");
+{
+  const hits = (s) => d.listFingerprintHits(s).join(",");
+  ok("命中 DSH 身份句 A", hits(d.rewriteFingerprints("You are an AI agent powered by DeepSeek Harness.")).length > 0
+    || d.rewriteFingerprints("You are an AI agent powered by DeepSeek Harness.") !== "You are an AI agent powered by DeepSeek Harness.");
+  const a = d.rewriteFingerprints("You are an AI agent powered by DeepSeek Harness.");
+  ok("A 被整段改写", a === "You are an AI assistant.", a);
+  const a2 = d.rewriteFingerprints("prefix You are an AI agent powered by DeepSeek Harness");
+  ok("A 无句号变种也改写", a2.includes("You are an AI assistant"), a2);
+  const brand = d.rewriteFingerprints("DeepSeek Harness Web GUI");
+  ok("品牌名 DeepSeek Harness 被替换", brand === "the agent harness Web GUI", brand);
+  const c = d.rewriteFingerprints('You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.');
+  ok("C 整段改写且去引号", c.includes("web interface") && !c.includes('"this page"'), c.slice(0, 80));
+  const b = d.rewriteFingerprints("Main branch (you will usually use this for PRs): master");
+  ok("B 任意位置改写", b === "Default branch (PRs usually go here): master", b);
+  ok("中性文本不被指纹表误伤", d.rewriteFingerprints("You are a helpful assistant.") === "You are a helpful assistant.");
+  ok("空串原样", d.rewriteFingerprints("") === "");
+  ok("指纹表 id 唯一", new Set(d.CLIENT_FINGERPRINTS.map((f) => f.id)).size === d.CLIENT_FINGERPRINTS.length);
+}
+
+// ===== 12. 运行时元数据裁剪 =====
+console.log("12. 运行时元数据裁剪");
+{
+  const env = "Before\n\n<environment_context>\nWORKDIR: /x\nOS: Windows\n</environment_context>\n\nAfter";
+  const out = d.pruneRuntimeFragments(env);
+  ok("environment_context 块被替换", out.includes("Environment context is provided by the harness."), out.slice(0, 90));
+  ok("块内细节被移除", !out.includes("WORKDIR"), out.slice(0, 90));
+  ok("块外文本保留", out.includes("Before") && out.includes("After"));
+
+  const perm = "x <permissions instructions>\nFilesystem sandboxing defines which files can be read or written.\n## How to request escalation\n...</permissions instructions> y";
+  const out2 = d.pruneRuntimeFragments(perm);
+  ok("permissions 块被替换", out2.includes("Runtime permissions apply"), out2.slice(0, 90));
+  ok("未闭合标签不动（宁可放过）", d.pruneRuntimeFragments("<environment_context> no closing tag") === "<environment_context> no closing tag");
+
+  const tail = "Intro text\n\nThe following deferred tools are now available via ToolSearch.\n- foo\n- bar";
+  const out3 = d.pruneRuntimeFragments(tail);
+  ok("运行时尾部被截断", out3.includes("Runtime tool, agent, skill, and MCP metadata"), out3.slice(0, 90));
+  ok("截断保留正文", out3.includes("Intro text"));
+}
+
+// ===== 13. harness 语义压缩（workbuddy2api PR #4 现行方案）=====
+console.log("13. harness 语义压缩");
+{
+  // 构造一个满足判据的长 Claude Code 模板（≥1000 字符 + ≥2 个标记）
+  const filler = "Follow the repository conventions and keep responses concise. ".repeat(30);
+  const claude = [
+    "You are an interactive agent that helps users with software engineering tasks.",
+    "",
+    "# Harness",
+    "# Session-specific guidance",
+    "# Memory",
+    "# Environment",
+    "# Context management",
+    filler,
+  ].join("\n");
+  ok("判据识别为 Claude harness", d.looksLikeClaudeHarness(claude) === true);
+  const compacted = d.compactHarnessMessage("system", claude);
+  ok("system 长模板被整块压缩", typeof compacted === "string" && compacted.length < 300, String(compacted && compacted.length));
+  ok("压缩后仍保留行为契约", compacted.includes("software engineering tasks"), compacted.slice(0, 60));
+
+  // assistant 不整块压（会丢对话内容）
+  ok("assistant 不整块压缩", d.compactHarnessMessage("assistant", claude) === null);
+  // 短文本不误判
+  ok("短文本不误判为 harness", d.looksLikeClaudeHarness("# Harness short") === false);
+  // Codex 标记
+  const codex = "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.\n# How you work\n" + filler;
+  ok("Codex system 被压缩", typeof d.compactHarnessMessage("system", codex) === "string");
+  // permissions / skills 标记
+  ok("permissions 标记被压缩", typeof d.compactHarnessMessage("system", "<permissions instructions>\nx\n</permissions instructions>") === "string");
+  ok("普通 system 不压缩", d.compactHarnessMessage("system", "You are a helpful assistant.") === null);
+}
+
+// ===== 14. 完整管线 desensitizeTemplateText =====
+console.log("14. 完整管线");
+{
+  const src = "You are an AI agent powered by DeepSeek Harness.\nRefuse DoS attacks and exploit development.";
+  const out = d.desensitizeTemplateText(src, { role: "system" });
+  // 插入点是「词首字符之后」：DoS -> D + ZWSP + oS
+  ok("管线同时处理指纹与敏感词", out.includes("You are an AI assistant.") && out.includes("D\u200boS"), JSON.stringify(out));
+  ok("管线幂等", d.desensitizeTemplateText(out, { role: "system" }) === out);
+  ok("空串安全", d.desensitizeTemplateText("") === "");
+  ok("非字符串安全", d.desensitizeTemplateText(null) === null);
+  // prune/compact 可关（回归旧行为）
+  const noCompact = d.desensitizeTemplateText(src, { role: "system", prune: false, compact: false });
+  ok("可关闭 prune/compact 只留 ZWSP", noCompact.includes("You are an AI assistant."));
+}
+
 console.log("");
-console.log(`结果：${pass} 通过 / ${failures.length} 失败`);
 if (failures.length) {
   console.log("失败项：\n - " + failures.join("\n - "));
   process.exit(1);
