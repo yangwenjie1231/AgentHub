@@ -155,8 +155,12 @@ export function checkinLabels(channel?: string): {
   /** 详情弹窗标题词：签到详情 / 领取详情 */
   detail: string;
 } {
+  // WorkBuddy AI（国际版）没有每日签到体系，每日积分靠「免费模型对话 + 活跃上报 +
+  // 网页会话」三条活跃通道发放（后端 dailyActivity）。加油包是一次性 trial，领过自动跳过。
+  // 故按钮必须是**每日**语义：写成「领加油包」会让用户以为一次性、领完再也不点，
+  // 每日积分就拿不到——这正是线上反馈的实证。
   if (channel === "workbuddy_ai") {
-    return { auto: "自动领加油包", run: "领加油包", shortRun: "领加油包", done: "领取成功", shortDone: "已领取", shortFail: "领取失败", detail: "领取详情" };
+    return { auto: "自动每日领积分", run: "每日领积分", shortRun: "领积分", done: "今日已领", shortDone: "今日已领", shortFail: "领取失败", detail: "每日领积分详情" };
   }
   if (isQoderChannel(channel)) {
     return { auto: "自动领 Credits", run: "领 Credits", shortRun: "领 Credits", done: "领取成功", shortDone: "已领取", shortFail: "领取失败", detail: "领取详情" };

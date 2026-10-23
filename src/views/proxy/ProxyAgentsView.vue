@@ -651,7 +651,13 @@ function channelCheckinDone(ch: ProxyChannelView): boolean {
 function checkinToolbarTitle(ch: ProxyChannelView): string {
   const L = checkinLabels(ch.id);
   if (!checkinBusy.value && channelCheckinDone(ch)) return `今日已全部完成，点击可重新执行（${L.shortRun}幂等，已完成的账号自动跳过）`;
-  if (ch.id === "workbuddy_ai") return "国际版无每日签到，这是一次性 trial 加油包";
+  // 国际版是**每日**动作：上游没有签到体系，每日积分挂在活跃上报 / 免费模型对话 /
+  // 网页会话三条通道上（后端 dailyActivity）。加油包是一次性 trial，领过会自动跳过，
+  // 不是这个按钮的目的——文案必须说清"每天点一次"，否则用户领完一次性加油包就走，
+  // 每日积分永远拿不到。
+  if (ch.id === "workbuddy_ai") {
+    return "每日领取积分：自动用免费模型 hy3 发一次最小对话，并完成活跃上报与网页会话（上游按这三条通道判定每日奖励）。一次性加油包若可领会自动领，已领则跳过。每天点一次";
+  }
   if (ch.id === "zcode") return "领取当前可领的奖励套餐（周末包等）；需要人机校验时会弹官方验证窗";
   if (isQoderChannel(ch.id)) return "领取当前可领的活动 Credits（每日 100，10:00 UTC+8 刷新，领取后 30 天有效）。只处理可领取的活动，需完成任务的活动会跳过";
   return `对渠道内全部账号执行每日${L.shortRun === "签到" ? "签到" : L.shortRun}（幂等，已完成的账号自动跳过）`;

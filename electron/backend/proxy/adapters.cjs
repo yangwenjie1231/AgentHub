@@ -1726,13 +1726,20 @@ function makeWorkBuddy(channelId) {
     },
 
     /** ② 桌面端保活：用免费模型发一次最小流式对话。
-     *  模型链取上游实测「不消耗积分」的免费模型，逐个尝试、第一个拿到 2xx 收口。
-     *  deepseek-v4.1-flash 放在最后：它是用户真实对话最常用的免费模型、免费窗口最先被打满，
-     *  保活没必要跟真实流量抢同一个账号×模型额度（hy3/hy4 同样免费，失败会自动往下试）。
+     *  模型链只放**实测确认不消耗积分**的模型，逐个尝试、第一个拿到 2xx 收口。
+     *
+     *  ⚠ 默认只有 hy3：hy4-preview / hy4-preview-f / deepseek-v4.1-flash 现已**不再免费**
+     *  （2026-10 用户实测确认）。把它们留在兜底链里，hy3 一旦失败就会自动去试付费模型——
+     *  一次保活烧掉用户真实额度，而 deepseek 的免费窗口要留给真正的对话。
+     *  「宁肯保活失败，也不能默默扣费」：缺的只是一天积分，扣错的是用户的钱。
+     *
+     *  确知某模型免费时，往 rules/headers.json 的 workbuddy_ai.keepaliveModels 里加
+     *  （配置项排在前面，仍可按需扩展），不要改硬编码默认值。
+     *
      *  必须**读**响应体（不读的请求上游可能不计活跃），但只需读满首个上限即可——SSE 没必要读完。 */
     async pokeActivity(account, secrets) {
       const c = this.cfg();
-      const FREE_MODELS = ["hy3", "hy4-preview", "hy4-preview-f", "deepseek-v4.1-flash"];
+      const FREE_MODELS = ["hy3"];
       const models = [...new Set([...(c.keepaliveModels || []), ...FREE_MODELS])];
       let lastMsg = "";
       for (const model of models) {

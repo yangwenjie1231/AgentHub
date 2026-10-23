@@ -160,6 +160,29 @@ async function main() {
       /if \(r\.ok === false && da && da\.ok\) r\.ok = true;/.test(idxSrc),
       "加油包失败但活跃通道走通时，本次动作判成功（主通道不被 trial 埋掉）"
     );
+
+    // ---- ⑤ 保活模型链只放实测免费的模型 ----
+    // hy4-preview / hy4-preview-f / deepseek-v4.1-flash 现已不再免费（2026-10 实测）。
+    // 留在兜底链里，hy3 一失败就会自动试付费模型——一次保活烧掉用户真实额度。
+    // 这里用源码断言把「宁肯失败不扣费」钉住，防止后人再把付费模型加回默认链。
+    const adSrc = fs.readFileSync(path.join(__dirname, "..", "electron", "backend", "proxy", "adapters.cjs"), "utf8");
+    assert(
+      /const FREE_MODELS = \["hy3"\];/.test(adSrc),
+      "保活默认模型链只有 hy3（不拿付费模型兜底）"
+    );
+    assert(
+      !/const FREE_MODELS = \["hy3", "hy4/.test(adSrc),
+      "默认链里没有 hy4 / deepseek 等已转付费的模型"
+    );
+    assert(
+      /c\.keepaliveModels/.test(adSrc),
+      "仍保留 keepaliveModels 配置口（确知免费时可显式扩展）"
+    );
+    // 顺序：keepaliveModels 在前，用户显式配置优先于硬编码默认
+    assert(
+      /\[\.\.\.new Set\(\[\.\.\.\(c\.keepaliveModels \|\| \[\]\), \.\.\.FREE_MODELS\]\)\]/.test(adSrc),
+      "配置项排在默认链前面（显式配置优先）"
+    );
   } finally {
     server.close();
     if (prevLoc === null) fs.rmSync(locFile, { force: true });
