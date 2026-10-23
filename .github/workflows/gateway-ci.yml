@@ -68,6 +68,10 @@ jobs:
           run_sbx tools/proxy-channels-selftest.cjs
           # 号池页渠道切换的源码契约（收起/展开形态、图标单一来源、定高与横向滚动约束）
           run_sbx tools/proxy-agents-switch-selftest.cjs
+          # 上游内容审核脱敏（issue #156）：词级零宽空格、角色隔离、幂等、工具描述不动 name
+          run_sbx tools/proxy-desensitize-selftest.cjs
+          # 积分保底与免费模型不被连坐（issue #157）：倍率判定、保底阈值、号码池选取行为
+          run_sbx tools/proxy-credit-floor-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest

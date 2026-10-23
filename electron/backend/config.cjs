@@ -257,6 +257,9 @@ function defaultConfig() {
       channelFailoverMax: 3,    // 单请求最多尝试渠道数（含主渠道；范围 1~10、超出按 10；上游尝试预算随上限放大：每模型 max(6, 本值+1) 次，failover 关闭恒 6）
       channelCooldownMs: 120000,     // 渠道降级基础时长（毫秒），失败翻倍（防半开震荡）
       channelCooldownCapMs: 900000,  // 渠道降级指数退避封顶（15 分钟）
+      creditFloor: 0,           // 积分保底（issue #157）：余额低于该值的账号不接**确认收费**的模型
+                                // （目录倍率 > 0 才判收费），把最后一点余额留给免费模型。
+                                // 0 = 关闭（默认，行为与引入前一致）。对齐 workbuddy2api 的 credit floor。
       checkinAutoRules: {},     // 按渠道自动签到：{ [渠道 id]: { enabled, time:"HH:mm", jitterMin } }，
                                 // 号池页各渠道工具栏各自设置（时间/抖动独立；默认全关）
       channelEnabled: {},       // 渠道启闭（「上游启闭」弹窗）：{ [渠道 id]: true|false }，缺省 = 启用。

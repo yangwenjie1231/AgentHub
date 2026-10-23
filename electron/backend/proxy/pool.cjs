@@ -101,6 +101,66 @@ function zeroBalanceUsable(channel) {
   } catch { return false; }
 }
 
+// ===== 积分保底（credit floor）与「免费模型不被连坐」=====
+// 背景（issue #157：WorkBuddy AI 国际版若额度耗尽，无法继续使用免费的模型）：
+// 旧实现把「余额为 0」直接判成整号 exhausted，于是付费额度耗尽后，**免费模型也一起不可用**。
+// 但 402（积分不足）是「模型级收费门槛」，不是「账号失效」——免费模型本来就不扣费。
+// 本次修正按「模型是否确认收费」分流，语义对齐 workbuddy2api 的 credit floor：
+//   · 余额为 0 / 已被积分耗尽冷却的账号 → 仍可服务**非收费**模型（免费/未观测）；
+//   · 余额低于 creditFloor 的账号 → 不接**确认收费**的模型，避免最后一点余额被打穿；
+//   · creditFloor = 0（默认）时保底关闭，行为与引入前一致，只保留免费模型放行修正。
+let creditFloor = 0;
+
+/** 设置积分保底阈值（<=0 / 非数字 = 关闭）。默认 0 关闭。 */
+function setCreditFloor(n) {
+  const v = Number(n);
+  creditFloor = Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  return creditFloor;
+}
+
+/** 当前保底阈值（0 = 关闭） */
+function getCreditFloor() {
+  return creditFloor;
+}
+
+/** 该渠道该模型的上游目录倍率（catalog.json 的 rate）。
+ *  返回 null = 目录未覆盖或倍率未知（**放行**，不据此惩罚账号）。
+ *  0 = 免费（不扣费）；>0 = 收费。惰性 require rules 避免顶层循环依赖。 */
+function modelRateOf(channel, model) {
+  const id = String(model || "").trim().toLowerCase();
+  if (!id) return null;
+  try {
+    const cat = require("./rules.cjs").get("catalog.json") || {};
+    const sec = cat[channel] || {};
+    for (const m of Array.isArray(sec.models) ? sec.models : []) {
+      if (m && String(m.id || "").toLowerCase() === id) {
+        const r = m.rate;
+        if (r == null || r === "") return null;
+        const v = Number(r);
+        return Number.isFinite(v) ? v : null;
+      }
+    }
+  } catch { /* 规则不可用：按未知处理（放行） */ }
+  return null;
+}
+
+/** 该模型是否「确认收费」：仅当目录倍率明确 > 0。
+ *  免费（0）与未知（null）都返回 false —— 宁可放行让它撞一次 402，
+ *  也不要把未知模型一律判成收费、把免费额度也锁死。 */
+function modelConfirmedPaid(channel, model) {
+  const rate = modelRateOf(channel, model);
+  return rate !== null && rate > 0;
+}
+
+/** 该账号的 exhausted 是否由「积分/余额」造成（这类账号仍可服务免费模型）。 */
+function isCreditExhausted(a) {
+  if (!a || a.status !== "exhausted") return false;
+  const why = String(a.coolReason || "");
+  if (/余额|积分/.test(why)) return true;
+  // 无原因文本时按余额判：观测到余额为 0 且非无限额度哨兵
+  return a.creditsAt > 0 && a.credits === 0;
+}
+
 /**
  * 池内选号：expire_first（默认，积分先到期先用）/ credit_first / round_robin
  * 两种自动切换（不发请求、调度期前置生效）：
@@ -111,26 +171,49 @@ function zeroBalanceUsable(channel) {
  * 被跳过的账号等下次额度刷新拿到新余额/新到期时间后自动复活（credits.cjs）。
  * maxInFlight > 0 时在途数已达上限的账号不参与候选（租约语义），
  * 全部忙时降级取在途最小者（不过载拒绝）；100ms 内刚选中过的账号让位给其他候选（防惊群）。
+ *
+ * model（可选）：传入本次要调的模型后启用两层「模型级」判定——
+ *  ③ 积分耗尽不连坐免费模型（#157）：余额耗尽/已因积分冷却的账号仍可服务**非确认收费**的模型；
+ *  ④ 积分保底：余额低于 creditFloor 的账号不接**确认收费**的模型（防最后一点余额被打穿）。
+ *  只有能确认「该模型收费」（目录倍率 > 0）时才拦；免费与未知倍率一律放行。
  */
-function pickAccount(channel, strategy, excludeIds, maxInFlight) {
+function pickAccount(channel, strategy, excludeIds, maxInFlight, model) {
   const now = Date.now();
   const exclude = new Set(excludeIds || []);
+  const paidModel = modelConfirmedPaid(channel, model);
+  const allowZeroForPaid = false; // 文字占位：确认收费的模型绝不允许 0 余额账号接
   const candidates = [];
   for (const a of poolAccounts(channel)) {
-    if (a.status !== "online" || !a.hasToken || exclude.has(a.id)) continue;
+    if (!a.hasToken || exclude.has(a.id)) continue;
+    // 积分耗尽账号的豁免判定（ⓘ 必须在 status 过滤之前算）：
+    // 非收费模型 → 放行；收费模型 → 不放行（等于旧行为）
+    const creditExhausted = isCreditExhausted(a);
+    const usableForThisModel = creditExhausted ? !paidModel : true;
+    if (a.status !== "online") {
+      if (!(a.status === "exhausted" && usableForThisModel)) continue;
+    }
     // credits === -1 = 企业版无限额度哨兵，不参与耗尽判定；
     // 声明 zeroBalanceUsable 的渠道（Cline）同样豁免——余额 0 不是它的硬门禁，
     // 真实门禁（每日额度 429）由错误分类落冷却处置，这里误标只会把账号锁死在调度外
     if (a.creditsAt > 0 && a.credits === 0 && !zeroBalanceUsable(channel)) {
-      // ① 已知余额不足：标记耗尽（次日 04:00 给复活机会），自动切换下一账号
-      store.updateAccount(a.id, { status: "exhausted", coolUntil: nextDay4AM(), coolReason: "余额不足，已自动切换" });
-      continue;
+      if (paidModel) {
+        // ① 已知余额不足 + 该模型确认收费：标记耗尽（次日 04:00 给复活机会），切换下一账号
+        store.updateAccount(a.id, { status: "exhausted", coolUntil: nextDay4AM(), coolReason: "余额不足，已自动切换" });
+        continue;
+      }
+      // ② 余额不足但该模型非收费（免费/未知）：**照常参与**。
+      //    免费模型不扣额度，把账号判死会让「额度耗尽后免费模型也用不了」（issue #157）。
+      //    收费请求仍由上面 ① 拦；未知倍率的请求允许撞一次 402，由错误分类落模型级冷却。
     }
     if (a.expiresAt > 0 && a.expiresAt <= now) {
-      // ② 余额已到期：标记失效（靠额度刷新复活），自动切换下一账号。
-      // coolUntil 不能写 0：effectiveStatus 的派生复活判据要求 cool_until 非 0，写 0 会让
-      // 这类 exhausted 永远失去「次日 04:00 复活」兜底，只剩余额刷新一条独木桥（#152）
+      // ③ 余额已到期：标记失效（靠额度刷新复活），自动切换下一账号。
+      //    coolUntil 不能写 0：effectiveStatus 的派生复活判据要求 cool_until 非 0，写 0 会让
+      //    这类 exhausted 永远失去「次日 04:00 复活」兜底，只剩余额刷新一条独木桥（#152）
       store.updateAccount(a.id, { status: "exhausted", coolUntil: nextDay4AM(), coolReason: "余额已到期，已自动切换" });
+      continue;
+    }
+    // ④ 积分保底：余额低于阈值且该模型确认收费 → 不接（保留余额给免费模型）
+    if (paidModel && creditFloor > 0 && a.credits !== -1 && a.credits < creditFloor) {
       continue;
     }
     candidates.push(a);
@@ -400,4 +483,5 @@ module.exports = {
   coolAccountModel, isModelCooled, accountModelCool, poolSummary, nextDay4AM,
   acquireAccount, releaseAccount, inFlightCount, softBackoffMs, noteSessionDead, noteServerError, noteSuccess,
   releaseCool, zeroBalanceUsable,
+  setCreditFloor, getCreditFloor, modelRateOf, modelConfirmedPaid, isCreditExhausted,
 };

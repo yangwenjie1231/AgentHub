@@ -366,6 +366,16 @@ function parseRateResetMs(text) {
 /** 「输入过大」判定：实现与词表在 util.cjs（唯一一份），server 与各适配器共用。 */
 const isInputTooLargeMsg = util.isInputTooLargeMsg;
 
+/** 该渠道该模型是否「确认收费」（目录倍率 > 0）。惰性 require pool：
+ *  server → pool 在文件顶部已有 require，这里仍走函数内调用是为了让分类逻辑
+ *  在 pool 未加载（单测直连）时安全降级为 false（=按未知放行，走旧的账号级语义）。 */
+function modelConfirmedPaidLazy(channel, model) {
+  try {
+    const p = require("./pool.cjs");
+    return typeof p.modelConfirmedPaid === "function" ? p.modelConfirmedPaid(channel, model) : false;
+  } catch { return false; }
+}
+
 /** 错误分类（对齐 handler.applyErrorPolicy 全表 + SOLO 专项）：
  *  决定冷却档位与是否换号。6004 = 模型级限流（罚账号×模型，切模型豁免）；
  *  11102 = 该账号不支持此模型（6h 指数负缓存）；4008 = 模型/账号级限流；4001 = 模型配置问题
@@ -373,7 +383,7 @@ const isInputTooLargeMsg = util.isInputTooLargeMsg;
  *  渠道私有业务码走扩展点 classifyError（契约见 adapters.cjs）：入参 channel 优先问适配器，
  *  返回非空即走渠道级分类。通用层保留的 4008/6004/11102/11115/11101 等码是**跨渠道共用**的
  * （trae/workbuddy/qoder 都会回同一族码），不能搬进单个渠道——搬走即改变其它渠道的分类结果 */
-function classifyUpstream(e, planLimit, channel) {
+function classifyUpstream(e, planLimit, channel, model) {
   if (channel) {
     const ad = adapters.get(channel);
     if (ad && typeof ad.classifyError === "function") {
@@ -381,7 +391,17 @@ function classifyUpstream(e, planLimit, channel) {
       if (r) return r;
     }
   }
-  if (planLimit || (e && e.status === 402)) return { kind: "credit", switchable: true, status: 402 };
+  if (planLimit || (e && e.status === 402)) {
+    // 402 = 积分不足。它与「账号失效」不是一回事（issue #157）：
+    // 免费模型不扣费，账号欠费时本应继续可用。这里区分两种情况——
+    //   · 模型**确认收费**（目录倍率 > 0）→ credit_model：模型级冷却，只摘这个模型；
+    //   · 收费与否未知/免费 → credit：沿用账号级「次日 04:00 复活」的保守语义
+    //     （未知时不去赌它免费，否则收费模型会反复撞 402 打穿余额）。
+    if (channel && modelConfirmedPaidLazy(channel, model)) {
+      return { kind: "credit_model", switchable: true, status: 402 };
+    }
+    return { kind: "credit", switchable: true, status: 402 };
+  }
   const msg = String((e && e.message) || "");
   const code = Number(e && e.code) || 0;
   if (code === 4001 || /model config is empty|config.*is empty/i.test(msg)) {
@@ -587,6 +607,10 @@ function applyCool(accId, model, cls, message) {
       return;
     case "model_blocked":
       pool.coolAccountModel(accId, model, 6 * 3600000, message, { backoff: true, baseMs: 6 * 3600000, capMs: 24 * 3600000 }); // 11102：6h 起指数封顶 24h
+      return;
+    case "credit_model":
+      // 402 但该模型确认收费：只摘掉「这个模型」，免费模型仍可用（issue #157）
+      pool.coolAccountModel(accId, model, Date.now() + 24 * 3600000, message || "积分不足（该模型需付费额度）");
       return;
     case "rate": {
       const until = cls.resetMs || (cls.retryAfterMs || 0) || (Date.now() + pool.softBackoffMs(accId));
@@ -997,6 +1021,9 @@ async function handleChat(req, res, settings, surface, convNotes) {
         const transientRetried = new Map(); // 瞬时错误（5xx/网络/超时）同账号原地重发计数：accId → 已重发次数
         // 每账号并发租约：expire_first 排序与并发无关，同窗口并发会话否则全打同一账号（租约语义）
         const perAccountLimit = Number(settings.concurrencyPerAccount) > 0 ? Number(settings.concurrencyPerAccount) : 3;
+        // 积分保底（issue #157）：余额低于阈值的账号不接**确认收费**的模型，
+        // 把最后一点余额留给免费模型。默认 0 = 关闭，行为与引入前一致。
+        pool.setCreditFloor(Number(settings.creditFloor) > 0 ? Number(settings.creditFloor) : 0);
         let poolEmpty = false; // 号池无可用账号（全冷却/耗尽/负缓存打光）
         let realTries = 0;     // 本渠道真实上游尝试次数（区分「打过但失败」与「没打就打光」）
         let modelCooledSkips = 0; // 负缓存跳过次数（6004/11102 是账号×模型粒度，不是渠道的错）
@@ -1004,7 +1031,7 @@ async function handleChat(req, res, settings, surface, convNotes) {
         let budgetOut = false; // 上游尝试预算用尽跳出（不是渠道的错，不降级）
         for (let attempt = 0; attempt <= 2 && !done; attempt++) {
           if (upstreamTries >= maxTries) { budgetOut = true; break; }
-          const acc = pool.pickAccount(chan, strategy, [...tried], perAccountLimit);
+          const acc = pool.pickAccount(chan, strategy, [...tried], perAccountLimit, targetModel);
           if (!acc) { poolEmpty = true; break; }
           tried.add(acc.id);
           // 模型级负缓存（6004 模型级限流 / 11102 该号不支持此模型）：直接换号，不浪费一次上游请求。
@@ -1075,7 +1102,17 @@ async function handleChat(req, res, settings, surface, convNotes) {
             // ⚠ 不能写 usedTargetModel——它同时喂 pool.noteSuccess，键须与冷却同口径
             if (r && r.model) usedForwardModel = r.model;
             if (r && r.planLimit) {
-              pool.coolAccount(acc.id, "credit");
+              // 402 = 该**模型**的积分不足，不是账号失效（issue #157）：
+              // 免费模型不扣费，本应继续可用。旧实现 coolAccount("credit") 把整号
+              // 封到次日 04:00，导致「额度耗尽后连免费模型都用不了」。
+              // 现在改为模型级冷却：只把「这个收费模型」从该账号上摘掉，
+              // 免费模型仍由 pickAccount 的 paidModel 判定放行。
+              if (pool.modelConfirmedPaid(chan, targetModel)) {
+                pool.coolAccountModel(acc.id, targetModel, pool.nextDay4AM(), "积分不足（该模型需付费额度）");
+              }
+              // 账号仍可能整体欠费：标一个「积分耗尽」但**保留免费模型可用性**。
+              // 这里不写 status=exhausted（那会连免费模型一起锁死），
+              // 只在已确认收费且目录没有其它免费模型时留痕，便于界面解释。
               lastErr = Object.assign(new Error("积分不足"), { status: 402 });
               // 积分耗尽常以流中 error 事件返回（trae 1005 / workbuddy 402），此时正文可能已出线。
               // 流式下换号重发会让客户端收到「半截旧答 + 完整新答」，就地收尾不再换号；
@@ -1106,7 +1143,7 @@ async function handleChat(req, res, settings, surface, convNotes) {
               // 与 catch 路径（下方 classifyUpstream 后的 switchable 检查）同口径：
               // 确定性拒绝（prompt_too_long / fatal / model_denied）换号必白撞，
               // 流中路径也必须终止，否则客户端参数错误会逐个冷却全池账号
-              const cls = classifyUpstream(lastErr, false, chan);
+              const cls = classifyUpstream(lastErr, false, chan, targetModel);
               humanizeAccountBlocked(lastErr, cls);
               applyCool(acc.id, targetModel, cls, lastErr.message);
               if (!cls.switchable) {
@@ -1160,7 +1197,7 @@ async function handleChat(req, res, settings, surface, convNotes) {
               markAttempt("fatal");
               break;
             }
-            const cls = classifyUpstream(e, false, chan);
+            const cls = classifyUpstream(e, false, chan, targetModel);
             humanizeAccountBlocked(e, cls);
             markAttempt(cls.kind);
             // 瞬时错误（5xx/网络/超时）同账号原地重发：先在这个账号上按配置次数重发吸收抖动，
@@ -1223,7 +1260,7 @@ async function handleChat(req, res, settings, surface, convNotes) {
         if (!done && !fatalErr && !budgetOut) {
           triedChannels.push({ chan, accounts: triedAccountNames });
           if (!degradedHere && realTries > 0 && lastErr) {
-            const cls = classifyUpstream(lastErr, false, chan);
+            const cls = classifyUpstream(lastErr, false, chan, targetModel);
             if (DEGRADABLE.has(cls.kind) && noteChannelFail(chan) >= 2) {
               degradeChannel(chan, String(lastErr.message || cls.kind).slice(0, 120), settings);
             }

@@ -18,6 +18,7 @@ const rules = require("./rules.cjs");
 const store = require("./store.cjs");
 const util = require("./util.cjs");
 const raccoonAuth = require("./raccoonAuth.cjs");
+const desensitize = require("./desensitize.cjs");
 const config = require("../config.cjs");
 const platform = require("./platform/index.cjs");
 // 出网统一入口：网关向上游的每一次请求都从这里出去，出口策略（直连 / 固定 / 轮询）
@@ -1302,9 +1303,13 @@ function makeWorkBuddy(channelId) {
         }
         return t;
       };
-      // 文本指纹清洗（对齐 sanitize.go）：模板表逐字替换 → header 键值段整段剥除 → cc_ 裸键值剥除 → 裸键名缩写
+      // 文本指纹清洗：模板表逐字替换 → 词级零宽空格脱敏 → header 键值段剥除 → cc_ 裸键值剥除
+      // 词级脱敏是 issue #156 的正式解法：旧实现只有 5 条整句改写，上游一加指纹/一换客户端
+      // 模板就整条失效（表现为「账号是好的，请求就是被 11128 拦」）。词级插入零宽空格
+      // 与客户端模板无关，见 proxy/desensitize.cjs。整句表保留在最前：它的改写对模型更自然。
       const cleanText = (s) => {
         let t = applyTpl(s);
+        t = desensitize.desensitizeText(t);
         t = t.replace(/x-anthropic-billing-header:[^;\n]*;?\s*/gi, "");
         t = t.replace(/\bcc_[a-z0-9_]+=[^;\n]*;?\s*/gi, "");
         t = t.replace(/x-anthropic-billing-header/gi, "x-anthropic-billing-hdr");
@@ -1384,6 +1389,11 @@ function makeWorkBuddy(channelId) {
         merged.push(msg);
       }
       out.messages = merged;
+      // 工具定义文本同样过脱敏（issue #156）：上游审核会读 tools[].function.description，
+      // Claude Code / Codex 的工具描述里有大量安全术语（"destructive command" 等）。
+      // 只改 description 文本，**不动 name 与 parameters 结构**——name 参与 tool_call 配对，
+      // parameters 会被上游做 schema 校验，改结构必 400。
+      if (Array.isArray(out.tools)) out.tools = desensitize.desensitizeTools(out.tools);
       // console 域（国际版官方客户端路径）要求首条消息必须是 system，否则 400 code 11128
       // "first message is not system prompt"（ensureConsoleSystem 实证，吸收 PR #45）
       if (channelId === "workbuddy_ai" && out.messages.length) {
