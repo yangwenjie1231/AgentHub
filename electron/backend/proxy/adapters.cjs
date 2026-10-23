@@ -1043,61 +1043,87 @@ function parseWbResource(data, isEnterprise) {
 /** 官方客户端会话头族（ChatMeta 实证：后台按 X-Conversation-Request-ID 聚合请求，
  *  一次 user send 内的所有重试/换号必须复用同一个 ID）。meta 由 server 在轮转循环外生成一次，
  *  循环内换号沿用同值；B3 规范只认 16/32 hex TraceId，入站透传值非法时回落消息级 ID */
-function wbConversationHeaders(body, meta) {
-  // 会话族 id 共享同一毫秒时间戳前缀（官方抓包实证：conversation-id /
-  // message-id / request-id / acp-connection-id 四者前 8 位相同）
+function wbConversationHeaders(body, meta, account) {
+  // 会话族 id 的真实规律（官方桌面端抓包 2026-10-23 实测，5 个请求分属 3 个会话）：
+  //   x-conversation-id         同一会话内**不变**，跨会话变（UUID 形态）
+  //   x-conversation-request-id 同一会话内**不变**（32 hex）
+  //   x-conversation-message-id 每个请求都**不同**（32 hex）
+  //   acp-connection-id         同一连接内不变（可跨会话复用）
+  // 会话 id 每轮都换 = 典型反代特征（上游看得出「每轮一个新会话」），必须稳定。
   const tsHex = Math.floor(Date.now() / 1000).toString(16).padStart(8, "0").slice(-8);
   const rand24 = () => crypto.randomBytes(12).toString("hex"); // 24 hex
-  const hex32 = () => tsHex + rand24();
   const fromMeta = meta && typeof meta.conversationRequestId === "string" && /^[0-9a-fA-F]{16}([0-9a-fA-F]{16})?$/.test(meta.conversationRequestId)
     ? meta.conversationRequestId
     : "";
-  const convReqId = fromMeta || hex32();
-  const messageId = hex32();
+  const traceId = fromMeta || tsHex + rand24();
+  // 会话级锚点：客户端给了就用客户端的；否则按**首条 user 消息**指纹稳定派生
+  // ⚠ 不能用 util.stableConvId（它取前 3 条消息）：首轮只有 2 条时哈希与次轮不同，
+  //   会话 id 就会变——而会话 id 必须跨轮恒等（官方抓包实证）。
+  const rawConv = body && (body.conversation_id || body.conversationId);
+  const conv16 = String(rawConv || "").trim() || stableConvAnchor(body && body.messages);
   const h = {
-    "x-conversation-request-id": convReqId, // 对话轮聚合主键，必发
-    "x-conversation-message-id": messageId,
-    "x-request-id": messageId,
-    "x-root-request-id": convReqId,
-    "x-trace-id": convReqId,
-    "x-b3-traceid": convReqId,
-    "x-b3-spanid": messageId.slice(0, 16),
+    // 会话 id：UUID 形态（官方如此），由稳定的会话锚点确定性派生 —— 同一会话恒等
+    "x-conversation-id": conv16 ? uuidFromHex16(conv16) : uuidV4(),
+    // 请求 id：官方是**会话级**稳定（同一会话多轮复用），故同样按会话锚点派生
+    "x-conversation-request-id": conv16 ? tsHex + sha256Hex(conv16 + "|req").slice(0, 24) : traceId,
+    // 消息 id：**每请求唯一**
+    "x-conversation-message-id": tsHex + rand24(),
+    "x-request-id": tsHex + rand24(),
+    // 追踪族：每请求一个（官方用 b3/traceparent 组合头，这里沿用既有形态）
+    "x-root-request-id": traceId,
+    "x-trace-id": traceId,
+    "x-b3-traceid": traceId,
+    "x-b3-spanid": traceId.slice(0, 16),
     "x-b3-sampled": "1",
   };
-  // X-Conversation-ID：客户端给了就透传原值；**没给必须自己造一个**。
-  // 上游把它与 request-id / message-id 当「会话三件套」做渠道校验，缺一即 400/11128
-  // （社区对照实验实证：同一账号同一 body 同一秒，仅头差异决定 11128/200，
-  //  见 dsh-connect-workbuddy#127）。早期实现「没给就不伪造」，等于新会话必被拦。
-  const convId = body && (body.conversation_id || body.conversationId);
-  h["x-conversation-id"] = typeof convId === "string" && convId ? convId : uuidV7();
+  h["x-request-id"] = h["x-conversation-message-id"];
+  // acp-connection-id：**账号级**稳定（官方语义是「连接」，可跨会话复用）。
+  // 同一账号的多次请求必须复用同一个值——每请求新造同样是反代特征。
+  h["acp-connection-id"] = account && account.uid
+    ? uuidFromHex16(sha256Hex("acp|" + account.uid).slice(0, 16))
+    : uuidV4();
   return h;
 }
 
-/** UUIDv7：48bit 毫秒时间戳 + 版本位 7 + variant 位 10 + 随机。
- *  官方客户端的会话族 id 全是这个形态。按字节直改版本/variant 位，避免手搓位运算出错。 */
-function uuidV7() {
-  const b = crypto.randomBytes(16);
-  const ms = Date.now();
-  b[0] = Math.floor(ms / 2 ** 40) & 0xff;
-  b[1] = Math.floor(ms / 2 ** 32) & 0xff;
-  b[2] = Math.floor(ms / 2 ** 24) & 0xff;
-  b[3] = Math.floor(ms / 2 ** 16) & 0xff;
-  b[4] = Math.floor(ms / 2 ** 8) & 0xff;
-  b[5] = ms & 0xff;
-  b[6] = (b[6] & 0x0f) | 0x70; // version = 7
-  b[8] = (b[8] & 0x3f) | 0x80; // variant = 10xx
-  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+function sha256Hex(s) {
+  return crypto.createHash("sha256").update(String(s)).digest("hex");
+}
+
+/** 会话锚点：按**首条 user 消息**派生 16 hex。
+ *  跨轮恒等——首条 user 消息在整个会话里不变（不像「前 3 条消息」在首轮消息数
+ *  不足 3 时会随轮次变化）。客户端自带 conversation_id 时优先用客户端的。 */
+function stableConvAnchor(messages) {
+  try {
+    const msgs = Array.isArray(messages) ? messages : [];
+    if (!msgs.length) return "";
+    let pick = null;
+    for (const m of msgs) {
+      if (String((m && m.role) || "").toLowerCase() === "user") { pick = m; break; }
+    }
+    if (!pick) pick = msgs[0];
+    const content = typeof pick.content === "string" ? pick.content : JSON.stringify(pick.content ?? null);
+    if (!content) return "";
+    return sha256Hex(`${pick.role || ""}|${content}`).slice(0, 16);
+  } catch {
+    return "";
+  }
+}
+
+/** 16 位 hex → UUID 形态（确定性，版本位 4 / variant 位 10）。
+ *  官方会话 id 是 UUID 形态，故由稳定的会话锚点派生出的 16 hex 也要包装成 UUID。 */
+function uuidFromHex16(hex) {
+  const s = String(hex || "").replace(/[^0-9a-fA-F]/g, "").padStart(32, "0").slice(0, 32).toLowerCase();
+  const h = s.slice(0, 12) + "4" + s.slice(13, 16) + ((parseInt(s.slice(16, 17), 16) & 0x3) | 0x8).toString(16) + s.slice(17, 32);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
-/** 会话三件套 + 追踪族：真实对话与保活旁路都必须带全。
- *  官方抓包（2026-10-23）里 x-conversation-id / x-conversation-message-id /
- *  x-conversation-request-id / acp-connection-id 四者共享同一 UUIDv7 时间戳前缀。 */
-function wbConversationIdHeaders(body, meta) {
-  const h = wbConversationHeaders(body, meta);
-  // acp-connection-id：官方桌面端每条对话都带（抓包实证），此前完全没发
-  h["acp-connection-id"] = uuidV7();
-  return h;
+/** UUIDv4（随机）：官方会话 id 的主流形态（抓包中 3 个会话有 2 个是 v4） */
+function uuidV4() {
+  const b = crypto.randomBytes(16);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
 /** WorkBuddy 账号级风控拦截识别：HTTP 403 + code 11140「request illegal」。
@@ -1489,8 +1515,11 @@ function makeWorkBuddy(channelId) {
      *  meta = 轮内会话元数据（server 在换号循环外生成一次，重试/换号复用同值） */
     async chat({ account, secrets, model, body, emit, meta }) {
       const c = this.cfg();
-      const payload = JSON.stringify(this.rewriteBody(model, body, account));
-      const headers = { ...this.headers(account, secrets), ...wbConversationIdHeaders(body, meta) };
+      const out = this.rewriteBody(model, body, account);
+      const payload = JSON.stringify(out);
+      // 会话头用**改写后**的 body：里面的 messages 才是真正发出去的形态，
+      // 首条 user 消息锚点才不会因改写（合并同角色消息等）而漂移。
+      const headers = { ...this.headers(account, secrets), ...wbConversationHeaders(out, meta, account) };
       const urls = [c.chatUrl, c.consoleChatUrl].filter(Boolean);
       let resp = null;
       let cancelTimer = () => {};
@@ -1789,7 +1818,7 @@ function makeWorkBuddy(channelId) {
       // 这正是「干净到只有 hi 的保活请求也被拦」的原因。
       const headers = {
         ...this.headers(account, secrets),
-        ...wbConversationIdHeaders(null, null),
+        ...wbConversationHeaders(null, null, account),
         "x-agent-type": "auxiliary",
         "x-agent-purpose": "conversation",
       };
