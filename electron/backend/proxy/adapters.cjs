@@ -1319,9 +1319,12 @@ function makeWorkBuddy(channelId) {
         const ent = account.enterpriseId || "";
         if (ent) h["x-enterprise-id"] = ent;
         else h["x-no-enterprise-id"] = "1";
+        // X-Domain：账号企业域优先；没有则发**上游端点域**（官方 CN 桌面端就是这么发的，
+        // AutoBuddy CN 模块 2026-10-27 实证：X-Domain 恒为 https://copilot.tencent.com）。
+        // 旧实现在无账号域时只发 x-no-department-info，等于缺了一个官方必发的头。
         const domain = account.domain || "";
         if (domain) h["x-domain"] = domain;
-        else h["x-no-department-info"] = "1";
+        else h["x-domain"] = (c.pluginBase || "https://copilot.tencent.com").replace(/\/+$/, "");
       }
       return h;
     },

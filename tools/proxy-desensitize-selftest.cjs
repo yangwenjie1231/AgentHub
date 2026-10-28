@@ -173,13 +173,13 @@ console.log("11. 客户端身份指纹");
   ok("命中 DSH 身份句 A", hits(d.rewriteFingerprints("You are an AI agent powered by DeepSeek Harness.")).length > 0
     || d.rewriteFingerprints("You are an AI agent powered by DeepSeek Harness.") !== "You are an AI agent powered by DeepSeek Harness.");
   const a = d.rewriteFingerprints("You are an AI agent powered by DeepSeek Harness.");
-  ok("A 被整段改写", a === "You are an AI assistant.", a);
+  ok("A 被整段改写（品牌名插连字符）", a === "You are an AI agent running on DeepSeek-Harness.", a);
   const a2 = d.rewriteFingerprints("prefix You are an AI agent powered by DeepSeek Harness");
-  ok("A 无句号变种也改写", a2.includes("You are an AI assistant"), a2);
+  ok("A 无句号变种也改写", a2.includes("DeepSeek-Harness") && !a2.includes("DeepSeek Harness"), a2);
   const brand = d.rewriteFingerprints("DeepSeek Harness Web GUI");
-  ok("品牌名 DeepSeek Harness 被替换", brand === "the agent harness Web GUI", brand);
+  ok("品牌名 DeepSeek Harness 插连字符（2026-10-27 实测方案）", brand === "DeepSeek-Harness Web GUI", brand);
   const c = d.rewriteFingerprints('You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.');
-  ok("C 整段改写且去引号", c.includes("web interface") && !c.includes('"this page"'), c.slice(0, 80));
+  ok("C 段品牌名被破坏（字面量必然匹配不上）", !c.includes("DeepSeek Harness") && c.includes("DeepSeek-Harness"), c.slice(0, 90));
   const b = d.rewriteFingerprints("Main branch (you will usually use this for PRs): master");
   ok("B 任意位置改写", b === "Default branch (PRs usually go here): master", b);
   ok("中性文本不被指纹表误伤", d.rewriteFingerprints("You are a helpful assistant.") === "You are a helpful assistant.");
@@ -245,13 +245,15 @@ console.log("14. 完整管线");
   const src = "You are an AI agent powered by DeepSeek Harness.\nRefuse DoS attacks and exploit development.";
   const out = d.desensitizeTemplateText(src, { role: "system" });
   // 插入点是「词首字符之后」：DoS -> D + ZWSP + oS
-  ok("管线同时处理指纹与敏感词", out.includes("You are an AI assistant.") && out.includes("D\u200boS"), JSON.stringify(out));
+  ok("管线同时处理指纹与敏感词",
+    out.includes("DeepSeek-Harness") && !out.includes("DeepSeek Harness") && out.includes("D\u200boS"),
+    JSON.stringify(out));
   ok("管线幂等", d.desensitizeTemplateText(out, { role: "system" }) === out);
   ok("空串安全", d.desensitizeTemplateText("") === "");
   ok("非字符串安全", d.desensitizeTemplateText(null) === null);
   // prune/compact 可关（回归旧行为）
   const noCompact = d.desensitizeTemplateText(src, { role: "system", prune: false, compact: false });
-  ok("可关闭 prune/compact 只留 ZWSP", noCompact.includes("You are an AI assistant."));
+  ok("可关闭 prune/compact 仍保留指纹改写", noCompact.includes("DeepSeek-Harness") && !noCompact.includes("DeepSeek Harness"));
 }
 
 console.log("");

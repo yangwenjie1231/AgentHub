@@ -269,15 +269,20 @@ const DEFAULTS = {
       // chat 出站 Origin/Referer 基域（originRefererFor 实证 CN=codebuddy.cn）
       origin: "https://www.codebuddy.cn",
       // 官方桌面端指纹（逆向实证）：三段式 UA 与 IDE 归属头组，少一项都可能被风控判为网关
-      clientVersion: "5.5.4",
+      // 版本对齐 AutoBuddy CN 模块（2026-10-27 更新，实测 UI 用 5.5.6）：
+      //   旧值 5.5.4 落后两个小版本；上游按客户端身份做渠道校验（11128
+      //   "Illegal API invocation from an unapproved channel"），版本过旧会被判非官方客户端。
+      clientVersion: "5.5.6",
       cliVersion: "2.137.1",
-      userAgent: "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1",
-      billingUA: "WorkBuddy/5.5.4",
+      userAgent: "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
+      billingUA: "WorkBuddy/5.5.6",
       ideName: "WorkBuddy",
+      // 官方实发值（AutoBuddy CN 桌面端头组实证）
+      productCode: "SaaS",
       modelsUrl: "https://copilot.tencent.com/console/enterprises/personal/models",
       // v3 客户端权威目录（主路，含倍率/能力/上下文元数据）：必须用三段式 CLI UA，否则 400 code 12403
       modelsV3Url: "https://copilot.tencent.com/v3/config",
-      catalogUA: "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1",
+      catalogUA: "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
       // 登录/账号类插件端点的上游域（与计费域不同，必须单独给）
       pluginBase: "https://copilot.tencent.com",
       // 刷新渠道标识（两处口径不一致："plugin" 与 "workbuddy"，实测后固化）

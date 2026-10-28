@@ -305,6 +305,35 @@ async function main() {
         /unavailable = code === 14001/.test(adSrc),
       "checkinStatus 的 unavailable 判定也看 code"
     );
+
+    console.log("9. CN 渠道身份（2026-10-27 实测对齐）");
+    {
+      const cnSrc = rulesSrcFor("workbuddy");
+      assert(/clientVersion: "5\.5\.6"/.test(cnSrc), "CN clientVersion = 5.5.6（旧值 5.5.4 落后两个小版本）", cnSrc.match(/clientVersion: "[^"]*"/)?.[0]);
+      assert(cnSrc.includes("WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"), "CN UA 三段式 5.5.6");
+      assert(/productCode: "SaaS"/.test(cnSrc), "CN productCode = SaaS（官方实发值）");
+      // X-Domain：无账号域时必须发端点域（官方 CN 桌面端恒发）
+      assert(
+        /h\["x-domain"\] = \(c\.pluginBase \|\| "https:\/\/copilot\.tencent\.com"\)/.test(adSrc),
+        "CN 无账号域时发端点域 X-Domain（此前只发 x-no-department-info，缺了官方必发头）"
+      );
+    }
+
+    console.log("10. DSH 品牌短语级改写（2026-10-27 实测方案）");
+    {
+      // AutoBuddy v2.1.2：上游对 "DeepSeek Harness" 复合短语做多处特征审计，
+      // 单句规则覆盖不到完整 system prompt 末尾段落 → 必须短语级兜底。
+      // 做法：只插一个连字符，语义语法不变，实测 100% 放行。
+      const dSrc = fsRead.readFileSync(pathMod.join(__dirname, "..", "electron", "backend", "proxy", "desensitize.cjs"), "utf8");
+      assert(/"DeepSeek Harness",\s*\n\s*to: "DeepSeek-Harness"/.test(dSrc),
+        "品牌短语 DeepSeek Harness → DeepSeek-Harness（插连字符）");
+      assert(/id: "dsh-brand-hyphen"/.test(dSrc), "短语级规则存在");
+      // ZWSP 必须豁免已改造好的品牌短语，否则会拆成 DeepSeek-Har<ZW>ness
+      assert(/DeepSeek-Harness\/g/.test(dSrc) && /GUARD/.test(dSrc),
+        "ZWSP 对 DeepSeek-Harness 做了豁免（不被二次拆词）");
+      // 旧方案（改成 the agent harness）会产出 "the the agent" 畸形，已废
+      assert(!/to: "the agent harness"/.test(dSrc), "旧的 the agent harness 改写已移除");
+    }
   } finally {
     server.close();
     if (prevLoc === null) fs.rmSync(locFile, { force: true });
