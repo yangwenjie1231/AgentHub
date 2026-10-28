@@ -387,28 +387,55 @@ git cherry-pick <commit>                        # 单个提交，不做 merge
    「设备指纹缺失/漂移」风控而加，且实测可用），但已知它与官方不一致——**改动前
    先实测**，不要盲从任一方。
 
-### 11128 到底在查什么（#603 实测，先读懂再动手）
+### 11128 到底在查什么（按 2026-10-28 最新社区实测更新）
 
 | 实测项 | 结论 |
 | --- | --- |
 | 检查范围 | **所有非 user 消息**：system 提示词 + 回传的 **assistant 历史** |
-| 匹配语义 | 大小写不敏感的**逐字符字面量子串比对**（不是关键词、不是语义） |
+| 匹配语义 | 大小写不敏感的**逐字符精确子串 / n-gram 模板匹配**（不是长度规则） |
 | 不查的位置 | `user` / `tool` / `reasoning_content` / `tool_call.arguments` |
-| 长度因素 | 7000 字符中性填充文本 → 200，**排除长度** |
-| 双端点 | `copilot.tencent.com` 与 `www.workbuddy.ai` 表现**完全一致** |
-| 账号因素 | 同 body 换号即 200，同号换任何 body 仍 400 —— **与账号无关** |
+| 长度因素 | 真实请求 1.86 MB / 728 条消息 / 39 tools 可通过；短请求也可被拦——**排除长度** |
+| 双端点 | `copilot.tencent.com` 与 `www.workbuddy.ai` 均有同类渠道校验，但指纹规则可能分批上线 |
+| 账号因素 | 同 body 换号仍 11128；最小 system + user 同凭据可 200 —— **不是封号** |
 
-三条指纹的锚定规则**各不相同**，这是最容易踩的坑：
+#### 2026-10-28：旧的「品牌词根因」结论被实测推翻
 
-| 指纹 | 内容 | 锚定 |
-| --- | --- | --- |
-| A | `You are an AI agent powered by DeepSeek Harness.` | **开头锚定**（前面有任意字符即失效，含前导空格） |
-| B | `Main branch (you will usually use this for PRs)` | 任意位置 |
-| C | Web GUI 两连句（221 字符） | 任意位置，**必须紧邻连续**（换行/换序/去引号都破坏匹配） |
+`dsh-auth-hub#1` 做了约 150 次对照实验：把 `DeepSeek Harness` 以
+「原样 / 零宽 U+200B / 全小写 / 全大写 / 换行拆开 / 制表拆开 / 只留 DSH /
+只留单词」分别发上去，**全部 HTTP 200**；而真实 system prompt 原样发必 400/11128。
+
+真正的触发点是 DSH 运行时上下文里的**自指内容**，两句连读才命中：
+
+```text
+Tokens prefixed with @ are paths the user explicitly referenced.
+Relative paths resolve from the workspace root; absolute paths identify files or
+ directories on the host.
+```
+
+三个独立 issue（`dsh-xdpool#77/#79`、`workbuddy2api-hub#680`）都定位到这里：
+
+| 变体 | 结果 |
+| --- | --- |
+| 最小失败前缀（111 字符，截到 `workspace root`） | **400 / 11128** |
+| 截到 `workspace r`（少最后 3 字符） | 200 |
+| 只保留任意单句 | 200 |
+| `workspace root` → `workspace directory` | 200 |
+| `prefixed with` → `starting with` | 200 |
+| 右端追加 `directory` / `folder` / 句号 | **仍 400**（原子串仍完整存在） |
+
+**关键教训**：只有改**子串内部**才能打破命中，右端加词、零宽拆品牌、换账号均无效。
+本 fork 现在做两处语义等价改写：
+
+- `Tokens prefixed with @ ...` → `Tokens starting with @ ...`
+- `Relative paths resolve from the workspace root` →
+  `Relative paths are resolved against the session directory`
+
+品牌名 `DeepSeek Harness → DeepSeek-Harness` 仍保留为加固，但已知它**不是必要触发点**，
+不得再把它当根因。
 
 **关键推论**：`assistant` 历史同样被查。一旦某轮回复复述过指纹句，它进入上下文后
-**该会话之后每一轮都会挂**，与用户输入无关。所以清洗必须覆盖 assistant，
-只洗 system 是修不干净的（#544 的原始方案就是这个漏点）。
+该会话之后每一轮都会挂。所以清洗必须覆盖 `system` / `developer` / `assistant`，
+**不动 user / tool**。
 
 ### 已落地的两处修正
 
@@ -418,24 +445,16 @@ git cherry-pick <commit>                        # 单个提交，不做 merge
 
 | 层 | 做什么 | 依据 |
 | --- | --- | --- |
-| ① 身份指纹整段改写 | `CLIENT_FINGERPRINTS` 表：A / 品牌名 / C / B 逐条换成中性说法 | #603 三条指纹 + 评论确认的品牌名根因 |
+| ① 自指指纹改写 | `@` 路径两句内部改写 + 旧身份/Web GUI/Main branch 规则 | #77/#79/#680 三方真实请求二分实测 |
 | ② 运行时元数据裁剪 | `environment_context` 等 5 类成对标签整段换一句话；ToolSearch / Agent 工具清单 / MCP 三类尾部截断 | workbuddy2api `_prune_runtime_fragments` |
 | ③ harness 语义压缩 | system + 长度 ≥1000 + Claude 标记命中 ≥2 → 换成行为契约摘要 | workbuddy2api `PR #4` |
-| ④ 词级零宽空格 | `DoS` → `D\u200boS`，兜底散词 | workbuddy2api `desensitize.py` |
-
-**为什么不能只靠 ④**：workbuddy2api 的实证原话是「CodeBuddy's channel review rejects
-that whole block **even after individual terms are split with zero-width spaces**,
-so it needs semantic compaction instead」——整块模板会被拒，拆词无效。
-
-**①的应用顺序有坑**：按 `from` 长度**降序**落。C 的 221 字符里含品牌名
-`DeepSeek Harness`，若品牌名规则先跑会把 C 改花，整段规则再也匹配不上，
-留下半改写状态（引号没去掉，字面量仍可能被认出）。这个 bug 是自测抓出来的。
+| ④ 词级零宽空格 | `DoS` → `D\u200boS`，仅兜底安全术语误审；**不用于 DSH 渠道指纹** | workbuddy2api `desensitize.py` |
 
 边界（改之前先读）：
-- 只处理 `system` / `developer` 角色 + `tools[].function.description`；
-- **不动** `user` / `assistant` 内容（真实对话语义零影响）；
+- 指纹改写只处理 `system` / `developer` / `assistant`（上游实测检查范围）；
+- **不动** `user` / `tool` 内容（真实用户输入和工具结果保持原样）；
 - **不改** tools 的 `name`（参与 tool_call 配对）与 `parameters`（上游做 schema 校验）；
-- 幂等：已插过零宽空格的词重复清洗不叠加。
+- 幂等：重复处理不叠加；`DeepSeek-Harness` 用占位符保护，不被 ZWSP 二次拆词。
 
 **② 积分保底与免费模型不被连坐（#157）** — `pool.cjs` / `server.cjs`
 

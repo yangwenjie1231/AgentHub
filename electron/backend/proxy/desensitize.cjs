@@ -67,21 +67,45 @@ const CLIENT_FINGERPRINTS = [
   // ⚠ 顺序很重要（见下方 FINGERPRINT_ORDER）：**短语级必须排在整句级之后执行**，
   // 否则整句规则永远匹配不上。这里按「整句 → 短语」书写，运行时按长度降序，效果一致。
   //
-  // —— ① 品牌短语级（2026-10-27 实测，最有效的一层）——
-  // AutoBuddy v2.1.2 的结论：上游对 "DeepSeek Harness" 这个**复合短语**做多处特征审计，
-  // 不只首句；完整 system prompt 末尾段落（Web GUI / 架构说明）里的词组合同样触发 11128。
-  // 单句规则覆盖不到，必须短语级兜底。
+  // —— ② 自指内容指纹（2026-10-27/28 三个独立实测，**CN 与国际版都触发**）——
+  // 真正触发 11128 的是这段 DSH 运行时上下文里的固定文案，两句**必须连读**才匹配：
   //
-  // **做法：只插一个连字符** → "DeepSeek-Harness"。语义与语法完全不变，
-  // 但不再匹配上游的特征串（它们按空格分词匹配）。实测 100% 放行。
+  //   Tokens prefixed with @ are paths the user explicitly referenced.
+  //   Relative paths resolve from the workspace root; absolute paths identify files or
+  //   directories on the host.
   //
-  // 为什么不用零宽空格（旧方案）：上游已能识别 ZWSP 变形；而且 ZWSP 会产出
-  // "the agent h<ZW>arness" 这种畸形文本，语法不通。
+  // 实测边界（dsh-xdpool#77 / #79、workbuddy2api-hub#680 三方独立复现）：
+  //   · 最小失败前缀 111 字符：截到 `…workspace r` 是 200，补上 `root` 就 400
+  //   · 单独任一句都不拦，必须两句连读
+  //   · `workspace root` → `workspace directory` 或调换语序 → 200
+  //   · 大小写不敏感、逐字符精确子串；与体量、位置无关
+  //   · **右端加词无效**：`…workspace root` 在 `…workspace root directory` 里仍是完整子串
+  //     → 只有改**子串内部**才能打破命中
+  //   · 只对 role=system / developer / assistant 生效，用户消息与工具结果不动
+  //
+  // ⚠ 同时纠正一个流传的错误结论：**`DeepSeek Harness` 不是指纹**。
+  //   dsh-auth-hub#1 做了反证——把该词以「原样/零宽U+200B/全小写/全大写/换行拆开/
+  //   制表拆开/只留DSH/只留单词」分别发上去，**全部 200 放行**；而真实 10KB system
+  //   原样发必 400。故零宽空格方案对本问题无效，官配是把指纹句内部改写。
+  {
+    id: "dsh-at-paths",
+    from: "Tokens prefixed with @ are paths the user explicitly referenced.",
+    to: "Tokens starting with @ are paths the user explicitly referenced.",
+    note: "#680 / #79：整句锚定第一句，只把 prefixed with 换成 starting with（语义不变）",
+  },
+  {
+    id: "dsh-relative-paths",
+    from: "Relative paths resolve from the workspace root",
+    to: "Relative paths are resolved against the session directory",
+    note: "#77：改子串内部（右端加词无效——仍是完整子串）",
+  },
+  // —— ③ 品牌短语级（保留作加固；已证实它本身不是指纹）——
+  // AutoBuddy v2.1.2 的做法，多改无害，但**不要**指望它解决 11128。
   {
     id: "dsh-brand-hyphen",
     from: "DeepSeek Harness",
     to: "DeepSeek-Harness",
-    note: "2026-10-27 实测：短语级插连字符，100% 放行；覆盖所有位置",
+    note: "加固用：实测非指纹，但改写无副作用",
   },
   // —— ② 整句级（首句锚定 A）——
   {

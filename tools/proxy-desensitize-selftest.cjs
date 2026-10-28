@@ -187,6 +187,32 @@ console.log("11. 客户端身份指纹");
   ok("指纹表 id 唯一", new Set(d.CLIENT_FINGERPRINTS.map((f) => f.id)).size === d.CLIENT_FINGERPRINTS.length);
 }
 
+// ===== 11b. DSH @ 路径说明两句（2026-10-27/28 实测的真正 11128 指纹）=====
+console.log("11b. DSH @ 路径说明指纹");
+{
+  const MIN111 = "Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root";
+  const FULL = "Tokens prefixed with @ are paths the user explicitly referenced.\nRelative paths resolve from the workspace root; absolute paths identify files or\ndirectories on the host.";
+  const out = d.desensitizeTemplateText(MIN111, { role: "system" });
+  ok("111 字符最小失败前缀被打破", !out.includes(MIN111), out);
+  ok("prefixed with → starting with（改子串内部）", out.includes("starting with @"), out);
+  ok("workspace root → session directory（改子串内部）", out.includes("session directory") && !out.includes("workspace root"), out);
+
+  const full = d.desensitizeTemplateText(FULL, { role: "system" });
+  ok("完整两句的第一句被改写", !full.includes("Tokens prefixed with @ are paths the user explicitly referenced."));
+  ok("完整两句的第二句被改写", !full.includes("Relative paths resolve from the workspace root"));
+  ok("重复处理幂等", d.desensitizeTemplateText(full, { role: "system" }) === full);
+
+  // 范围边界：真实 user 输入不改（上游只查 system/developer/assistant）
+  const userText = [{ role: "user", content: MIN111 }];
+  const userOut = d.desensitizeMessages(userText);
+  ok("user 消息中的同文原样保留", userOut[0].content === MIN111);
+
+  // 社区实测：品牌名不是必要触发点，@ 路径两句才是；两条规则都要在表中
+  const ids = d.CLIENT_FINGERPRINTS.map((f) => f.id);
+  ok("规则表包含 dsh-at-paths", ids.includes("dsh-at-paths"));
+  ok("规则表包含 dsh-relative-paths", ids.includes("dsh-relative-paths"));
+}
+
 // ===== 12. 运行时元数据裁剪 =====
 console.log("12. 运行时元数据裁剪");
 {
