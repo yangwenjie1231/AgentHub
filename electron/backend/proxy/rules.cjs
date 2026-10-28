@@ -741,9 +741,38 @@ function ensureFiles() {
       const cur = JSON.parse(fs.readFileSync(p, "utf8"));
       const before = JSON.stringify(cur);
       mergeMissing(cur, data);
+      forceUpstreamIdentity(file, cur, data);
       migrateFile(file, cur);
       if (JSON.stringify(cur) !== before) fs.writeFileSync(p, JSON.stringify(cur, null, 2), "utf8");
     } catch { /* 文件坏了留给 loadFile 报错并回退内置默认 */ }
+  }
+}
+
+/** 客户端身份字段：**必须以代码内置值为准**，不能被磁盘上的旧值锁死。
+ *
+ *  为什么必须强制覆盖（不是 mergeMissing 那种「只补缺失」）：
+ *  这些字段是「伪装成官方客户端」的身份数据，上游按它做渠道校验
+ *  （400/11128 "Illegal API invocation from an unapproved channel"）。
+ *  上游版本会持续轮换，代码里的默认值必须能随版本升级生效。
+ *  而 mergeMissing 只补缺失键、绝不覆盖已有值 → 用户装过一次之后，
+ *  代码里所有身份字段的更新**全部不生效**，表现为「改了代码还是被拦」。
+ *  （本 fork 实测踩过：CN 停在 5.5.4、AI 停在 5.5.4/旧 UA，改了三轮都不生效。）
+ *
+ *  这些值本来就不该由用户手改：改错只会被风控，没有任何收益。
+ *  需要自定义的场景（自建代理域等）保留 origin / chatUrl / pluginBase 等**不动**。 */
+const FORCE_IDENTITY_FIELDS = [
+  "clientVersion", "cliVersion", "userAgent", "billingUA", "catalogUA",
+  "ideName", "productCode", "stainlessPackageVersion", "stainlessRuntimeVersion",
+];
+
+function forceUpstreamIdentity(file, cur, defaults) {
+  if (file !== "headers.json" || !cur || typeof cur !== "object" || !defaults) return;
+  for (const [channel, def] of Object.entries(defaults)) {
+    if (!def || typeof def !== "object" || !cur[channel] || typeof cur[channel] !== "object") continue;
+    for (const key of FORCE_IDENTITY_FIELDS) {
+      if (def[key] === undefined) continue;
+      cur[channel][key] = def[key];
+    }
   }
 }
 

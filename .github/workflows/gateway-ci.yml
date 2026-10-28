@@ -81,6 +81,8 @@ jobs:
           # WorkBuddy 对话链路端到端（改写→出站→SSE解析→事件；保活绕过 rewriteBody，
           # 这条是「网关能用」的唯一护栏）
           run_sbx tools/proxy-wb-chat-e2e-selftest.cjs
+          # 客户端身份字段强制同步（旧磁盘配置不能被代码更新锁死——踩过三轮改动不生效）
+          run_sbx tools/proxy-rules-identity-sync-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest
