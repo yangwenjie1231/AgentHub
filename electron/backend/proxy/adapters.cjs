@@ -1406,7 +1406,9 @@ function makeWorkBuddy(channelId) {
         t = t.replace(/x-anthropic-billing-header:[^;\n]*;?\s*/gi, "");
         t = t.replace(/\bcc_[a-z0-9_]+=[^;\n]*;?\s*/gi, "");
         t = t.replace(/x-anthropic-billing-header/gi, "x-anthropic-billing-hdr");
-        return t;
+        // 出站兜底剥零宽字符：历史里可能残留旧版注入的 U+200B（旧 ZWSP 方案产物），
+        // 不清掉会随 assistant 历史继续回传、被模型复述进正文。只删零宽字符，不动可见内容。
+        return desensitize.stripZeroWidth(t);
       };
       // 孤儿 tool_call↔tool 配对清理（实测：不成对会让上游对之后每条消息都返 400）
       const rawMsgs = (Array.isArray(body.messages) ? body.messages : []).map((m) => ({ ...m }));
@@ -1610,7 +1612,9 @@ function makeWorkBuddy(channelId) {
                   return tc;
                 });
               }
-              if (Object.keys(d).length) emit({ type: "delta", delta: d });
+              // 入站兜底剥零宽字符：模型可能复述历史里的 U+200B（旧 ZWSP 方案产物），
+              // 不剥就会显示到用户界面并再次进入下一轮历史。只删零宽，不动可见内容。
+              if (Object.keys(d).length) emit({ type: "delta", delta: desensitize.stripZeroWidthDeep(d) });
             }
             if (choice.finish_reason) emit({ type: "finish", reason: choice.finish_reason });
           }

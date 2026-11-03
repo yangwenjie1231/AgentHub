@@ -173,11 +173,11 @@ console.log("11. 客户端身份指纹");
   ok("命中 DSH 身份句 A", hits(d.rewriteFingerprints("You are an AI agent powered by DeepSeek Harness.")).length > 0
     || d.rewriteFingerprints("You are an AI agent powered by DeepSeek Harness.") !== "You are an AI agent powered by DeepSeek Harness.");
   const a = d.rewriteFingerprints("You are an AI agent powered by DeepSeek Harness.");
-  ok("A 被整段改写（品牌名插连字符）", a === "You are an AI agent running on DeepSeek-Harness.", a);
+  ok("A 被整段改写（running on → operating on）", a === "You are an AI agent operating on DeepSeek-Harness.", a);
   const a2 = d.rewriteFingerprints("prefix You are an AI agent powered by DeepSeek Harness");
-  ok("A 无句号变种也改写", a2.includes("DeepSeek-Harness") && !a2.includes("DeepSeek Harness"), a2);
+  ok("A 无句号变种也改写", a2.includes("operating on") && !a2.includes("DeepSeek Harness"), a2);
   const brand = d.rewriteFingerprints("DeepSeek Harness Web GUI");
-  ok("品牌名 DeepSeek Harness 插连字符（2026-10-27 实测方案）", brand === "DeepSeek-Harness Web GUI", brand);
+  ok("品牌名 DeepSeek-Harness 插连字符", brand === "DeepSeek-Harness Web GUI", brand);
   const c = d.rewriteFingerprints('You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.');
   ok("C 段品牌名被破坏（字面量必然匹配不上）", !c.includes("DeepSeek Harness") && c.includes("DeepSeek-Harness"), c.slice(0, 90));
   const b = d.rewriteFingerprints("Main branch (you will usually use this for PRs): master");
@@ -187,30 +187,63 @@ console.log("11. 客户端身份指纹");
   ok("指纹表 id 唯一", new Set(d.CLIENT_FINGERPRINTS.map((f) => f.id)).size === d.CLIENT_FINGERPRINTS.length);
 }
 
-// ===== 11b. DSH @ 路径说明两句（2026-10-27/28 实测的真正 11128 指纹）=====
-console.log("11b. DSH @ 路径说明指纹");
+// ===== 11b. DSH @ 路径说明两句（多版本措辞 + 空白归一）=====
+console.log("11b. DSH @ 路径说明指纹（rc.5+ / <=rc.2 双措辞）");
 {
-  const MIN111 = "Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root";
-  const FULL = "Tokens prefixed with @ are paths the user explicitly referenced.\nRelative paths resolve from the workspace root; absolute paths identify files or\ndirectories on the host.";
-  const out = d.desensitizeTemplateText(MIN111, { role: "system" });
-  ok("111 字符最小失败前缀被打破", !out.includes(MIN111), out);
-  ok("prefixed with → starting with（改子串内部）", out.includes("starting with @"), out);
-  ok("workspace root → session directory（改子串内部）", out.includes("session directory") && !out.includes("workspace root"), out);
+  // 本机 DSH 0.2.1-rc.5+ 实际措辞
+  const NEW_S0 = "Tokens starting with @ are paths the user explicitly referenced.";
+  const NEW_S1 = "Relative paths are resolved against the session directory";
+  // 10-27 那批（<=rc.2）
+  const OLD_S0 = "Tokens prefixed with @ are paths the user explicitly referenced.";
+  const OLD_S1 = "Relative paths resolve from the workspace root";
 
-  const full = d.desensitizeTemplateText(FULL, { role: "system" });
-  ok("完整两句的第一句被改写", !full.includes("Tokens prefixed with @ are paths the user explicitly referenced."));
-  ok("完整两句的第二句被改写", !full.includes("Relative paths resolve from the workspace root"));
-  ok("重复处理幂等", d.desensitizeTemplateText(full, { role: "system" }) === full);
+  for (const pair of [["rc.5+", NEW_S0, NEW_S1], ["<=rc.2", OLD_S0, OLD_S1]]) {
+    const out = d.desensitizeTemplateText(pair[1] + "\n" + pair[2], { role: "system" });
+    ok("[" + pair[0] + "] 第一句被改写", !out.includes(pair[1]), out.slice(0, 90));
+    ok("[" + pair[0] + "] 第二句被改写", !out.includes(pair[2]), out.slice(0, 140));
+  }
 
-  // 范围边界：真实 user 输入不改（上游只查 system/developer/assistant）
-  const userText = [{ role: "user", content: MIN111 }];
-  const userOut = d.desensitizeMessages(userText);
-  ok("user 消息中的同文原样保留", userOut[0].content === MIN111);
+  // 空白归一变体：双空格 / 换行也必须命中（modelmux#224：上游按行内空白归一匹配）
+  const variants = [
+    "You are an AI agent running on DeepSeek  Harness.",
+    "You are an AI agent running on DeepSeek\nHarness.",
+  ];
+  for (const v of variants) {
+    const out = d.desensitizeTemplateText(v, { role: "system" });
+    ok("空白变体被改写: " + JSON.stringify(v.slice(20, 46)),
+      !/AI agent running on DeepSeek\s+Harness/i.test(out), out);
+  }
 
-  // 社区实测：品牌名不是必要触发点，@ 路径两句才是；两条规则都要在表中
+  // 范围边界：真实 user 输入不改
+  const userOut = d.desensitizeMessages([{ role: "user", content: NEW_S0 }]);
+  ok("user 消息中的同文原样保留", userOut[0].content === NEW_S0);
+
   const ids = d.CLIENT_FINGERPRINTS.map((f) => f.id);
-  ok("规则表包含 dsh-at-paths", ids.includes("dsh-at-paths"));
-  ok("规则表包含 dsh-relative-paths", ids.includes("dsh-relative-paths"));
+  ok("规则表含 dsh-at-paths-new", ids.includes("dsh-at-paths-new"));
+  ok("规则表含 dsh-at-paths-old", ids.includes("dsh-at-paths-old"));
+  ok("规则表含 dsh-relative-paths-new", ids.includes("dsh-relative-paths-new"));
+  ok("规则表含 dsh-relative-paths-old", ids.includes("dsh-relative-paths-old"));
+  ok("规则表含 dsh-brand-opener", ids.includes("dsh-brand-opener"));
+
+  // from === to 的规则等于没写——本次踩过的坑，加回归断言
+  const noop = d.CLIENT_FINGERPRINTS.filter((f) => f.from === f.to).map((f) => f.id);
+  ok("没有 from===to 的空规则", noop.length === 0, noop.join(","));
+}
+
+// ===== 11c. 零宽字符：默认不再注入 + 可剥离 =====
+console.log("11c. 零宽字符处理（U+200B 过滤）");
+{
+  const src = "Refuse requests for DoS attacks and exploit development.";
+  const def = d.desensitizeTemplateText(src, { role: "system" });
+  ok("默认不注入零宽空格", def.indexOf("\u200b") < 0, def);
+  const on = d.desensitizeTemplateText(src, { role: "system", zwsp: true });
+  ok("zwsp:true 时才注入", on.indexOf("\u200b") >= 0, on);
+  ok("stripZeroWidth 删除 U+200B", d.stripZeroWidth("a\u200bb") === "ab");
+  ok("stripZeroWidth 删除 FEFF/200C/200D", d.stripZeroWidth("a\uFEFFb\u200Cc\u200Dd") === "abcd");
+  ok("stripZeroWidth 不动可见内容", d.stripZeroWidth("正常文本 ABC") === "正常文本 ABC");
+  ok("stripZeroWidth 空值安全", d.stripZeroWidth("") === "" && d.stripZeroWidth(null) === null);
+  ok("stripZeroWidthDeep 递归处理对象",
+    JSON.stringify(d.stripZeroWidthDeep({ a: "x\u200by", b: ["p\u200bq"] })) === '{"a":"xy","b":["pq"]}');
 }
 
 // ===== 12. 运行时元数据裁剪 =====
@@ -268,11 +301,11 @@ console.log("13. harness 语义压缩");
 // ===== 14. 完整管线 desensitizeTemplateText =====
 console.log("14. 完整管线");
 {
-  const src = "You are an AI agent powered by DeepSeek Harness.\nRefuse DoS attacks and exploit development.";
+  const src = "You are an AI agent running on DeepSeek-Harness.\nRefuse requests for DoS attacks and exploit development.";
   const out = d.desensitizeTemplateText(src, { role: "system" });
-  // 插入点是「词首字符之后」：DoS -> D + ZWSP + oS
-  ok("管线同时处理指纹与敏感词",
-    out.includes("DeepSeek-Harness") && !out.includes("DeepSeek Harness") && out.includes("D\u200boS"),
+  // 指纹靠语义改写（running→operating），默认不再插零宽空格
+  ok("管线同时处理指纹改写（零宽默认关闭）",
+    out.includes("operating on") && out.includes("DeepSeek-Harness") && out.indexOf("\u200b") < 0,
     JSON.stringify(out));
   ok("管线幂等", d.desensitizeTemplateText(out, { role: "system" }) === out);
   ok("空串安全", d.desensitizeTemplateText("") === "");

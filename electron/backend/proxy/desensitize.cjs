@@ -67,37 +67,76 @@ const CLIENT_FINGERPRINTS = [
   // ⚠ 顺序很重要（见下方 FINGERPRINT_ORDER）：**短语级必须排在整句级之后执行**，
   // 否则整句规则永远匹配不上。这里按「整句 → 短语」书写，运行时按长度降序，效果一致。
   //
-  // —— ② 自指内容指纹（2026-10-27/28 三个独立实测，**CN 与国际版都触发**）——
-  // 真正触发 11128 的是这段 DSH 运行时上下文里的固定文案，两句**必须连读**才匹配：
+  // —— ② 自指内容指纹（DSH `@` 路径说明；**措辞会随 DSH 版本变，必须多版本覆盖**）——
+  // 这是 11-128 的主因：DSH 运行时上下文里的固定文案，两句**必须连读**才匹配。
   //
-  //   Tokens prefixed with @ are paths the user explicitly referenced.
-  //   Relative paths resolve from the workspace root; absolute paths identify files or
-  //   directories on the host.
+  // 措辞演进（每一版都要单独覆盖，`from` 对不上就等于没改）：
+  //   DSH ≤0.2.1-rc.2（2026-10-27 那批）：
+  //     Tokens prefixed with @ are paths the user explicitly referenced.
+  //     Relative paths resolve from the workspace root; absolute paths identify files or
+  //   DSH 0.2.1-rc.5+（2026-11-02 起，本机实测）：
+  //     Tokens starting with @ are paths the user explicitly referenced.
+  //     Relative paths are resolved against the session directory; absolute paths identify files or
   //
-  // 实测边界（dsh-xdpool#77 / #79、workbuddy2api-hub#680 三方独立复现）：
-  //   · 最小失败前缀 111 字符：截到 `…workspace r` 是 200，补上 `root` 就 400
+  // 实测边界（dsh-xdpool#77/#79、workbuddy2api-hub#680、dsh-workbuddy-bridge#29 四方复现）：
   //   · 单独任一句都不拦，必须两句连读
-  //   · `workspace root` → `workspace directory` 或调换语序 → 200
+  //   · 对措辞与语序敏感：同义改写 / 换序 / 去掉 `root` 都放行
   //   · 大小写不敏感、逐字符精确子串；与体量、位置无关
-  //   · **右端加词无效**：`…workspace root` 在 `…workspace root directory` 里仍是完整子串
-  //     → 只有改**子串内部**才能打破命中
-  //   · 只对 role=system / developer / assistant 生效，用户消息与工具结果不动
+  //   · **右端加词无效**：原子串仍完整存在 → 只有改**子串内部**才能打破命中
+  //   · 只对 role=system / developer / assistant 生效
   //
-  // ⚠ 同时纠正一个流传的错误结论：**`DeepSeek Harness` 不是指纹**。
-  //   dsh-auth-hub#1 做了反证——把该词以「原样/零宽U+200B/全小写/全大写/换行拆开/
-  //   制表拆开/只留DSH/只留单词」分别发上去，**全部 200 放行**；而真实 10KB system
-  //   原样发必 400。故零宽空格方案对本问题无效，官配是把指纹句内部改写。
+  // ⚠ 架构级警告（modelmux#224 的结论，务必读）：
+  //   「触发面远大于字面表，逐条补串收敛不了」——上游是按「官方客户端 system 模板」
+  //   做整段/首段比对，任何第三方客户端的开场白都可能命中。本表只是**收敛手段**，
+  //   不是完备解。真正的结构性解法是：命中 11128 时用**中性系统提示词**重试一次
+  //   （见 server.cjs 的 11128 处理），以及把本表做成可追加的数据。
   {
-    id: "dsh-at-paths",
-    from: "Tokens prefixed with @ are paths the user explicitly referenced.",
-    to: "Tokens starting with @ are paths the user explicitly referenced.",
-    note: "#680 / #79：整句锚定第一句，只把 prefixed with 换成 starting with（语义不变）",
+    id: "dsh-at-paths-new",
+    from: "Tokens starting with @ are paths the user explicitly referenced.",
+    to: "Tokens beginning with @ denote paths the user explicitly referenced.",
+    note: "rc.5+ 措辞（本机实测）；start→begin、are→denote，语义不变",
   },
   {
-    id: "dsh-relative-paths",
+    id: "dsh-at-paths-old",
+    from: "Tokens prefixed with @ are paths the user explicitly referenced.",
+    to: "Tokens beginning with @ denote paths the user explicitly referenced.",
+    note: "≤rc.2 措辞",
+  },
+  {
+    id: "dsh-relative-paths-new",
+    from: "Relative paths are resolved against the session directory",
+    to: "Relative paths are resolved from the session directory",
+    note: "rc.5+ 措辞（本机实测）；against→from",
+  },
+  {
+    id: "dsh-relative-paths-old",
     from: "Relative paths resolve from the workspace root",
-    to: "Relative paths are resolved against the session directory",
-    note: "#77：改子串内部（右端加词无效——仍是完整子串）",
+    to: "Relative paths are resolved from the session directory",
+    note: "≤rc.2 措辞",
+  },
+  // —— ③ 品牌首句（另一条**独立**指纹，modelmux#224 实测）——
+  // 与 @ 路径两句**互不相关**：这条按「行内空白归一后」匹配，
+  // 双空格 / 换行拆开仍会命中（实测：`DeepSeek  Harness` 双空格仍 400，
+  // `DeepSeek\nHarness` 换行才放行）。故必须整句改写，不能只拆单词。
+  {
+    id: "dsh-brand-opener",
+    from: "You are an AI agent running on DeepSeek-Harness.",
+    to: "You are an AI agent operating on DeepSeek-Harness.",
+    note: "modelmux#224：行内空白归一匹配，须整句改写（running on→operating on）",
+  },
+  {
+    id: "dsh-brand-opener-nodot",
+    from: "You are an AI agent running on DeepSeek-Harness",
+    to: "You are an AI agent operating on DeepSeek-Harness",
+    note: "无句号变种",
+  },
+  // 品牌名分隔符变体：上游按行内空白归一匹配，故 `DeepSeek Harness` / `DeepSeek  Harness`
+  // / `DeepSeek\nH​arness` 都要覆盖（连字符形态由上面两条 + dsh-brand-hyphen 负责）。
+  {
+    id: "dsh-brand-space",
+    from: "DeepSeek Harness",
+    to: "DeepSeek-Harness",
+    note: "空格分隔变体（双空格/换行由正则层覆盖）",
   },
   // —— ③ 品牌短语级（保留作加固；已证实它本身不是指纹）——
   // AutoBuddy v2.1.2 的做法，多改无害，但**不要**指望它解决 11128。
@@ -146,13 +185,34 @@ const FINGERPRINT_ORDER = CLIENT_FINGERPRINTS
   .filter((f) => f && typeof f.from === "string" && f.from)
   .sort((a, b) => b.from.length - a.from.length);
 
+/**
+ * 空白归一变体表：上游按「行内空白归一后」匹配（modelmux#224 实测——
+ * `DeepSeek  H​arness` 双空格仍 400、`DeepSeek\nH​arness` 换行才放行），
+ * 故除字面量匹配外，还要用「空白 → \s+」的正则再兜一层，覆盖双空格/换行/制表形态。
+ * 只对「含空格且足够长」的 from 生效，避免短词误伤。
+ */
+const FINGERPRINT_REGEXES = FINGERPRINT_ORDER
+  .filter((f) => f.from.includes(" ") && f.from.length >= 12)
+  .map((f) => {
+    const parts = f.from.split(/\s+/).map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    return { fp: f, re: new RegExp(parts.join("\\s+"), "gi") };
+  });
+
 /** 把 ① 应用到一个文本 blob。无命中原样返回（零拷贝快路径）。 */
 function rewriteFingerprints(text) {
   if (typeof text !== "string" || !text) return text;
   let t = text;
+  // 先跑字面量（最快、最精确）
   for (const fp of FINGERPRINT_ORDER) {
     if (t.indexOf(fp.from) < 0) continue;
     t = t.split(fp.from).join(fp.to);
+  }
+  // 再跑空白归一变体（字面量漏掉的双空格/换行形态）
+  for (const { fp, re } of FINGERPRINT_REGEXES) {
+    re.lastIndex = 0;
+    if (!re.test(t)) continue;
+    re.lastIndex = 0;
+    t = t.replace(re, fp.to);
   }
   return t;
 }
@@ -296,6 +356,17 @@ function looksLikeHarnessUser(text) {
 /**
  * 对一条「客户端模板集中地」的文本跑完整管线 ①②③④。
  * 这是 adapters.cjs 的 cleanText 应该调用的入口。
+ *
+ * ⚠ ZWSP（④）**默认关闭**。理由：
+ *   1. 对 DSH 渠道指纹**无效**——`dsh-auth-hub#1` 用 150 次对照证明，把品牌词以
+ *      零宽/大小写/换行/制表各种形态发上去全部 200，而真实 system 原样发必 400。
+ *      即 ZWSP 从来不是解法。
+ *   2. 有**污染成本**：零宽空格会随 assistant 历史回传、被模型复述进正文，
+ *      用户肉眼可见（本次会话就出现了 U+200B），且无法从下游清洗。
+ *   3. 真正的解法是语义改写（①②），不改变可见字符。
+ *
+ * 仍保留实现与开关（`zwsp: true` 可开），供确有需要的渠道单独启用；
+ * 默认不启用，避免"改了没效果还留垃圾"。
  */
 function desensitizeTemplateText(text, opts) {
   const o = opts || {};
@@ -306,8 +377,30 @@ function desensitizeTemplateText(text, opts) {
     const c = compactHarnessMessage(o.role || "system", t);
     if (c != null) t = c;
   }
-  t = desensitizeText(t);
+  // ④ 默认关闭（见上方说明）：只在显式 zwsp:true 时才插零宽空格
+  if (o.zwsp === true) t = desensitizeText(t);
   return t;
+}
+
+/** 清洗任意文本里残留的零宽字符（U+200B/200C/200D/FEFF）。
+ *  用于两处：① 出站前兜底（防历史里已有的 ZWSP 继续传上去）；
+ *  ② 入站响应后（防模型复述的 ZWSP 回落到用户界面）。
+ *  只删零宽字符，不动可见内容——对语义零影响。 */
+const ZERO_WIDTH_RE = /[\u200B-\u200D\uFEFF]/g;
+function stripZeroWidth(text) {
+  if (typeof text !== "string" || !text) return text;
+  return text.indexOf("\u200b") < 0 && !ZERO_WIDTH_RE.test(text) ? text : text.replace(ZERO_WIDTH_RE, "");
+}
+function stripZeroWidthDeep(value, depth) {
+  if ((depth || 0) > 8) return value;
+  if (typeof value === "string") return stripZeroWidth(value);
+  if (Array.isArray(value)) return value.map((v) => stripZeroWidthDeep(v, (depth || 0) + 1));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = stripZeroWidthDeep(v, (depth || 0) + 1);
+    return out;
+  }
+  return value;
 }
 
 /**
@@ -569,6 +662,9 @@ module.exports = {
   desensitizeTools,
   desensitizeTemplateText,
   rewriteFingerprints,
+  stripZeroWidth,
+  stripZeroWidthDeep,
+  ZERO_WIDTH_RE,
   pruneRuntimeFragments,
   compactHarnessMessage,
   looksLikeClaudeHarness,
