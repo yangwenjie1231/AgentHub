@@ -90,29 +90,41 @@ const CLIENT_FINGERPRINTS = [
   //   做整段/首段比对，任何第三方客户端的开场白都可能命中。本表只是**收敛手段**，
   //   不是完备解。真正的结构性解法是：命中 11128 时用**中性系统提示词**重试一次
   //   （见 server.cjs 的 11128 处理），以及把本表做成可追加的数据。
+  // ── 措辞覆盖表（每个 DSH 版本各一套，缺一不可）────────────────────────
+  // dsh-workbuddy-bridge#29 的逐句二分实测（rc.5）：
+  //   S0 单独 → 200；S1 单独 → 200；**S0 + S1 → 400/11-128**
+  //   即「组合指纹」：改任一句即失配（issue 验证只改 S0 就恢复 200）。
+  // 故两套措辞都收，且 S1 单独也加（issue 建议：S1 单句虽不触发，
+  // 但若 DSH 再改 S0，S1 就会成为新的组合一半）。
   {
-    id: "dsh-at-paths-new",
+    id: "dsh-at-paths-rc5",
     from: "Tokens starting with @ are paths the user explicitly referenced.",
-    to: "Tokens beginning with @ denote paths the user explicitly referenced.",
-    note: "rc.5+ 措辞（本机实测）；start→begin、are→denote，语义不变",
+    to: "Paths prefixed with @ are locations the user pointed at.",
+    note: "rc.5 措辞（#29 逐句二分实测；改 S0 即恢复 200）",
   },
   {
-    id: "dsh-at-paths-old",
-    from: "Tokens prefixed with @ are paths the user explicitly referenced.",
-    to: "Tokens beginning with @ denote paths the user explicitly referenced.",
-    note: "≤rc.2 措辞",
+    id: "dsh-at-paths-rc23",
+    from: "Tokens starting with @ are paths the user explicitly referenced.",
+    to: "Paths starting with @ are locations the user explicitly pointed at.",
+    note: "rc.2/rc.3 措辞",
   },
   {
-    id: "dsh-relative-paths-new",
+    id: "dsh-relative-paths-rc5",
+    from: "Relative paths are resolved against the session directory",
+    to: "Relative paths resolve from the workspace directory",
+    note: "rc.5 S1（单句不触发，但可能是新组合的一半）",
+  },
+  {
+    id: "dsh-relative-paths-rc23",
     from: "Relative paths are resolved against the session directory",
     to: "Relative paths are resolved from the session directory",
-    note: "rc.5+ 措辞（本机实测）；against→from",
+    note: "rc.2/rc.3 S1",
   },
   {
-    id: "dsh-relative-paths-old",
-    from: "Relative paths resolve from the workspace root",
-    to: "Relative paths are resolved from the session directory",
-    note: "≤rc.2 措辞",
+    id: "dsh-at-paths-legacy",
+    from: "Paths prefixed with @ point to files the user referenced.",
+    to: "Paths prefixed with @ are locations the user pointed at.",
+    note: "更早版本措辞（#680 那批）",
   },
   // —— ③ 品牌首句（另一条**独立**指纹，modelmux#224 实测）——
   // 与 @ 路径两句**互不相关**：这条按「行内空白归一后」匹配，
@@ -198,6 +210,46 @@ const FINGERPRINT_REGEXES = FINGERPRINT_ORDER
     return { fp: f, re: new RegExp(parts.join("\\s+"), "gi") };
   });
 
+/**
+ * 结构化兜底（**不依赖精确措辞**）——应对 DSH 再次改词。
+ *
+ * 背景：`@` 路径说明这段的**确切句子**随 DSH 版本变（rc.2/rc.3/rc.5 各不相同），
+ * 而字面量表只能覆盖已知版本。用户可能跑任意版本，逐条补串必然滞后
+ * （modelmux#224：「触发面远大于字面表，逐条补串收敛不了」）。
+ *
+ * 故再加一层按**句式结构**匹配的正则：只要这段「@ 路径说明」的骨架还在
+ * （`…@ … paths/locations … the user …`），就改写掉，不要求逐字一致。
+ * 只匹配 `@` 开头的短句（长度受限），避免误伤正文里的普通句子。
+ */
+const STRUCTURAL_FINGERPRINTS = [
+  {
+    id: "struct-at-paths",
+    // 匹配「以 @ 开头/包含 @ 的路径说明句」，容忍任意措辞变体
+    re: /\b(?:Tokens|Paths|Values|Items|Strings)\s+(?:prefixed|starting|beginning)\s+with\s+@[^.\n]{0,140}\./gi,
+    to: "Paths prefixed with @ are locations the user pointed at.",
+    note: "结构化：覆盖任意版本的 @ 路径说明首句",
+  },
+  {
+    id: "struct-relative-paths",
+    re: /\bRelative\s+paths?\s+(?:are\s+resolved|resolve|is\s+resolved)[^.\n]{0,160}(?:session|workspace|working)\s+(?:directory|root)[^.\n]{0,160}\./gi,
+    to: "Relative paths are resolved from the workspace directory.",
+    note: "结构化：覆盖任意版本的相对路径说明句",
+  },
+];
+
+/** 应用结构化兜底（幂等：改写后的句子不再匹配原始模式） */
+function applyStructuralRewrites(text) {
+  if (typeof text !== "string" || !text) return text;
+  let t = text;
+  for (const s of STRUCTURAL_FINGERPRINTS) {
+    s.re.lastIndex = 0;
+    if (!s.re.test(t)) continue;
+    s.re.lastIndex = 0;
+    t = t.replace(s.re, s.to);
+  }
+  return t;
+}
+
 /** 把 ① 应用到一个文本 blob。无命中原样返回（零拷贝快路径）。 */
 function rewriteFingerprints(text) {
   if (typeof text !== "string" || !text) return text;
@@ -214,6 +266,8 @@ function rewriteFingerprints(text) {
     re.lastIndex = 0;
     t = t.replace(re, fp.to);
   }
+  // 最后跑结构化兜底（不依赖精确措辞，应对 DSH 再次改词）
+  t = applyStructuralRewrites(t);
   return t;
 }
 
@@ -662,6 +716,8 @@ module.exports = {
   desensitizeTools,
   desensitizeTemplateText,
   rewriteFingerprints,
+  applyStructuralRewrites,
+  STRUCTURAL_FINGERPRINTS,
   stripZeroWidth,
   stripZeroWidthDeep,
   ZERO_WIDTH_RE,

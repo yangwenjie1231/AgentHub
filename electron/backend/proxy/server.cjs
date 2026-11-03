@@ -24,6 +24,7 @@ const pool = require("./pool.cjs");
 const adapters = require("./adapters.cjs");
 const provider = require("./provider.cjs");
 const util = require("./util.cjs");
+const desensitize = require("./desensitize.cjs");
 const openaiOut = require("./protocols/openai-out.cjs");
 const anthropicIn = require("./protocols/anthropic-in.cjs");
 const anthropicOut = require("./protocols/anthropic-out.cjs");
@@ -855,6 +856,17 @@ async function handleChat(req, res, settings, surface, convNotes) {
   };
 
   const emit = (ev) => {
+    // ===== 零宽字符统一剥离（所有渠道、所有事件类型的唯一出口）=====
+    // 旧版脱敏方案曾往 system 里注入 U+200B（零宽空格）拆词，副作用是：
+    //   · 随 assistant 历史回传，被模型复述进正文 → 用户界面上能看到空白乱码；
+    //   · 各渠道适配器有 20+ 个 emit 点，逐点清洗必然漏。
+    // 故在**统一出口**做一次深度剥离：只删零宽字符（U+200B/200C/200D/FEFF），
+    // 不动任何可见内容，对语义零影响。上层的 delta/usage/finish/error 全部经过这里。
+    if (ev && (ev.type === "delta" || ev.type === "error")) {
+      ev = { ...ev, ...(ev.type === "delta"
+        ? { delta: desensitize.stripZeroWidthDeep(ev.delta) }
+        : { message: desensitize.stripZeroWidth(ev.message) }) };
+    }
     if (ev.type === "delta") {
       // sink 返回「客户端真正可消费的实质内容有没有出现过」：ttftMs 与 sentDelta 只能由它置位。
       // 噪声帧不计——既让统计页 TTFT 虚低，又会短路 catch 分支的 `sentDelta || ttftMs` 禁令、

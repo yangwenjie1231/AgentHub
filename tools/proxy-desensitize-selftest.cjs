@@ -195,7 +195,7 @@ console.log("11b. DSH @ 路径说明指纹（rc.5+ / <=rc.2 双措辞）");
   const NEW_S1 = "Relative paths are resolved against the session directory";
   // 10-27 那批（<=rc.2）
   const OLD_S0 = "Tokens prefixed with @ are paths the user explicitly referenced.";
-  const OLD_S1 = "Relative paths resolve from the workspace root";
+  const OLD_S1 = "Relative paths are resolved against the session directory";
 
   for (const pair of [["rc.5+", NEW_S0, NEW_S1], ["<=rc.2", OLD_S0, OLD_S1]]) {
     const out = d.desensitizeTemplateText(pair[1] + "\n" + pair[2], { role: "system" });
@@ -219,10 +219,10 @@ console.log("11b. DSH @ 路径说明指纹（rc.5+ / <=rc.2 双措辞）");
   ok("user 消息中的同文原样保留", userOut[0].content === NEW_S0);
 
   const ids = d.CLIENT_FINGERPRINTS.map((f) => f.id);
-  ok("规则表含 dsh-at-paths-new", ids.includes("dsh-at-paths-new"));
-  ok("规则表含 dsh-at-paths-old", ids.includes("dsh-at-paths-old"));
-  ok("规则表含 dsh-relative-paths-new", ids.includes("dsh-relative-paths-new"));
-  ok("规则表含 dsh-relative-paths-old", ids.includes("dsh-relative-paths-old"));
+  ok("规则表含 dsh-at-paths-rc5", ids.includes("dsh-at-paths-rc5"));
+  ok("规则表含 dsh-at-paths-rc23", ids.includes("dsh-at-paths-rc23"));
+  ok("规则表含 dsh-relative-paths-rc5", ids.includes("dsh-relative-paths-rc5"));
+  ok("规则表含 dsh-relative-paths-rc23", ids.includes("dsh-relative-paths-rc23"));
   ok("规则表含 dsh-brand-opener", ids.includes("dsh-brand-opener"));
 
   // from === to 的规则等于没写——本次踩过的坑，加回归断言

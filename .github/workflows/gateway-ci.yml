@@ -83,6 +83,8 @@ jobs:
           run_sbx tools/proxy-wb-chat-e2e-selftest.cjs
           # 客户端身份字段强制同步（旧磁盘配置不能被代码更新锁死——踩过三轮改动不生效）
           run_sbx tools/proxy-rules-identity-sync-selftest.cjs
+          # 零宽字符（U+200B 等）统一剥离：emit 出口一处覆盖所有渠道
+          run_sbx tools/proxy-zero-width-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest
