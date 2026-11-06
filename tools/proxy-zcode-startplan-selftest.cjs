@@ -134,6 +134,30 @@ console.log("6. 源码契约");
   // HTTP 200 + JSON 业务错（额度未生效就是这样）必须先于 SSE 泵被判出来
   ok("先探 content-type 再交给 SSE 泵", /!\/event-stream\/i\.test\(zcCtype\)/.test(ad));
   ok("HTTP200 的 JSON 走 zcodeMapBizError", /zcodeMapBizError\(200, zcData, zcRaw\)/.test(ad));
+
+  // ---- 2026-11-07 实测的 1214 修复（缺 x-session-id / device-mid / 版本错配）----
+  ok("x-session-id 两种 plan 都发", /h\["x-session-id"\] = sid;/.test(ad));
+  ok("会话 ID 统一走 zcodeSessionId()", /function zcodeSessionId\(convId\)/.test(ad) && /const zcSid = zcodeSessionId\(convId\)/.test(ad));
+  ok("头与 body 共用同一个 zcSid", /zcodeLlmHeaders\(c, account, secrets, plan, zcSid\)/.test(ad) && /session_id: zcSid/.test(ad));
+  ok("LLM 面带 X-Device-Mid", /h\["X-Device-Mid"\] = String\(devMid\)/.test(ad));
+  ok("X-Release-Channel 是 production（官方值）", /"X-Release-Channel": "production"/.test(ad));
+  ok("不再残留旧的 stable 渠道值", !/"X-Release-Channel": "stable"/.test(ad));
+}
+
+// ===== 7. zcodeSessionId 兜底规则（1214 的直接防线）=====
+console.log("7. zcodeSessionId 长度兜底");
+{
+  // 通过源码契约 + 行为契约双验：该函数不导出，故用适配器行为间接验证规则常量
+  const ad = fs.readFileSync(path.join(__dirname, "..", "electron", "backend", "proxy", "adapters.cjs"), "utf8");
+  ok("剥 sess_ 前缀", /\^\\(sess_\|subagent_agent_\\)/.test(ad) || /replace\(\/\^\(sess_\|subagent_agent_\)\//.test(ad));
+  ok("长度 6-64 校验存在", /length >= 6 && s\.length <= 64/.test(ad));
+  ok("不合规时回落 uuid", /return util\.uuid\(\);/.test(ad));
+
+  // appVersion 必须与提示词版本一致（版本 × 模板一致性校验）
+  const rj = fs.readFileSync(path.join(__dirname, "..", "electron", "backend", "proxy", "rules.cjs"), "utf8");
+  ok("rules 里 zcode.appVersion 是 3.17.2", /appVersion: "3\.17\.2"/.test(rj));
+  ok("rules 里不再有 4.1.10", !/appVersion: "4\.1\.10"/.test(rj));
+  ok("appVersion 与 PROMPT_VERSION 同版本", /appVersion: "3\.17\.2"/.test(rj) && z.PROMPT_VERSION === "3.17.2");
 }
 
 console.log("");

@@ -518,10 +518,15 @@ const DEFAULTS = {
     },
     // ===== ZCode（智谱 GLM 编码套餐）=====
     // 协议事实：上游是 Anthropic Messages（coding-plan 与 start-plan 统一）；
-    // 头组复刻官方 3.12.3 客户端（LLM 面带 X-ZCode-Agent、不带 X-Device-Mid；
+    // 头组复刻官方桌面客户端（LLM 面带 X-ZCode-Agent + X-Device-Mid + x-session-id；
     // billing/claim 控制面反之）。appVersion 上游变更时改这里即热生效，无需发版。
+    //
+    // ⚠ appVersion 必须与 zcodeSystemPrompt.json 的提示词版本一致（当前都是 3.17.2）：
+    //   start-plan 端点做「版本 × 模板」一致性校验，头里写 3.17.2 但 body 还是旧版模板
+    //   会被判 405/3012（oc-auth 0.1.46 踩过：自称 3.17.2 却发 3.14.3 文本）。
+    //   旧值 "4.1.10" 是 ZCode CLI 版本线，与桌面客户端版本号不是一回事，已废弃。
     zcode: {
-      appVersion: "4.1.10",
+      appVersion: "3.17.2",
       sourceTitle: "cli",
       refererOrigin: "https://zcode.z.ai",
       // coding-plan（付费套餐，凭据 = coding-plan API key "{apiKey}.{secret}"）

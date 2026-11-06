@@ -4018,7 +4018,26 @@ const zcodeAnthropic = require("./zcodeAnthropic.cjs");
 // ZCode 官方 system 前缀：B 优先从本机客户端 bundle 提取，失败回落内置常量（官方客户端检测，防 405/3012）
 const zcodeOfficialSystem = require("./zcodeOfficialSystem.cjs");
 
-/** LLM 面身份头组（复刻官方 3.12.3 buildLlmIdentityHeaders：带 X-ZCode-Agent，不带 X-Device-Mid） */
+/**
+ * zcode 的 x-session-id 兜底规则（2026-11-07 实测）。
+ *
+ * 上游硬校验 6–64 字符，不合规直接：
+ *   400 {"code":1214,"msg":"The request task ID length must be between 6 and 64 characters"}
+ * 报错文案像「UUID 格式错」，实际只校验长度，语义是「请求任务 ID」。
+ *
+ * 客户端的 conversationId 不可信：stableConvId() 是短 hash（可能 <6 字符），
+ * 也可能为空；直接透传会随机撞 1214。故：
+ *   · 剥掉 sess_ / subagent_agent_ 前缀（官方客户端不带）；
+ *   · 长度 <6 或 >64 时改用 uuid（36 字符，安全区间）。
+ * 同一会话要稳定（上游按它做 prompt cache 分区），所以只在「不合规」时才换 uuid。
+ */
+function zcodeSessionId(convId) {
+  const s = String(convId || "").replace(/^(sess_|subagent_agent_)/, "");
+  if (s.length >= 6 && s.length <= 64) return s;
+  return util.uuid();
+}
+
+/** LLM 面身份头组（复刻官方桌面客户端：带 X-ZCode-Agent + X-Device-Mid + x-session-id） */
 function zcodeLlmHeaders(c, account, secrets, plan, convId) {
   const ver = c.appVersion || "4.1.10";
   const h = {
@@ -4027,7 +4046,7 @@ function zcodeLlmHeaders(c, account, secrets, plan, convId) {
     "User-Agent": `ZCode/${ver} ai-sdk/anthropic/3.0.81`,
     "X-ZCode-App-Version": ver,
     "X-Title": `Z Code@${c.sourceTitle || "cli"}`,
-    "X-Release-Channel": "stable",
+    "X-Release-Channel": "production",
     "X-Client-Language": "zh-CN",
     "X-Client-Timezone": Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
     "X-ZCode-Agent": "glm",
@@ -4038,13 +4057,22 @@ function zcodeLlmHeaders(c, account, secrets, plan, convId) {
     "x-zcode-trace-id": util.uuid(),
     "x-zcode-session-type": "main",
   };
+  // 设备指纹：官方每个 LLM 请求都带（oc-auth 实测；缺它上游侧 prompt cache 命中率差、
+  // 且新版风控会疑）。按号注入，取账号 meta.deviceMid，取不到回落到本机 deviceMid。
+  const devMid = resolveAccountDeviceMid(account) || zcodeDeviceMid();
+  if (devMid) h["X-Device-Mid"] = String(devMid);
+  // x-session-id：**两种 plan 都必须发**。上游校验 6–64 字符，缺了或长度不合直接
+  // 400 {"code":1214,"msg":"The request task ID length must be between 6 and 64 characters"}。
+  // 客户端的 conversationId 可能极短（stableConvId 是短 hash）或为空，故此处统一兜底。
+  const sid = zcodeSessionId(convId);
   if (plan === "coding-plan") {
     h["x-api-key"] = secrets.refreshToken;
     h["authorization"] = `Bearer ${secrets.refreshToken}`;
     h["x-query-id"] = util.uuid();
-    h["x-session-id"] = convId ? String(convId).replace(/^(sess_|subagent_agent_)/, "") : util.uuid();
+    h["x-session-id"] = sid;
   } else {
     h["authorization"] = `Bearer ${secrets.token}`;
+    h["x-session-id"] = sid;
   }
   return h;
 }
@@ -4089,7 +4117,7 @@ function zcodeCtlHeaders(c, secrets, account) {
     "X-Title": `Z Code@${c.sourceTitle || "cli"}`,
     "X-ZCode-App-Version": ver,
     "X-Platform": c.platform || "win32-x64",
-    "X-Release-Channel": "stable",
+    "X-Release-Channel": "production",
     "X-Client-Language": "zh-CN",
     "X-Client-Timezone": Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
     "X-Os-Category": "windows",
@@ -4206,6 +4234,9 @@ const zcode = {
   async chat({ account, secrets, model, body, emit, meta }) {
     const c = this.cfg();
     const convId = (meta && meta.conversationId) || util.stableConvId(body && body.messages) || "";
+    // 会话 ID 只算一次，头（x-session-id）与 body（metadata.user_id.session_id）共用。
+    // 上游按它校验 6–64 字符（1214），两处不一致或为空都会挂。见 zcodeSessionId 注释。
+    const zcSid = zcodeSessionId(convId);
     // 三段式 system 的第三块要带「工作环境」段（官方 environment 形状）。
     // 取官方客户端会看到的信息：工作目录 / 是否 git 仓 / 平台 / 系统版本。
     // 取不到就不写那几行——不编造（多写的行同样会让形状偏离）。
@@ -4237,7 +4268,7 @@ const zcode = {
         ? (provider === "bigmodel" ? c.bigmodelAnthropicBase : c.zaiAnthropicBase)
         : c.startPlanAnthropicBase;
       const url = `${String(base).replace(/\/+$/, "")}/v1/messages`;
-      const headers = zcodeLlmHeaders(c, account, secrets, plan, convId);
+      const headers = zcodeLlmHeaders(c, account, secrets, plan, zcSid);
       // 挂载可能存在的一次性人机校验凭据（one-shot header）
       const pendingCap = getPendingCaptcha(account && account.id);
       if (pendingCap && pendingCap.verifyParam) {
@@ -4266,13 +4297,16 @@ const zcode = {
       // 官方流量规范（zcode-api E2e/UIo 逆向实证）：无论 coding-plan 还是 start-plan，
       // 官方客户端发送给 Anthropic 协议的 metadata.user_id 必须是特定结构的 JSON 字符串：
       // {"device_id":"<deviceMid>","account_uuid":"","session_id":"<sessionId>"}
-      const mid = resolveAccountDeviceMid(account);
-      const cleanSessionId = convId ? String(convId).replace(/^(sess_|subagent_agent_)/, "") : "";
+      const mid = resolveAccountDeviceMid(account) || zcodeDeviceMid();
+      // ⚠ metadata.user_id.session_id 必须与头里的 x-session-id **同一个值**（2026-11-07 实测）：
+      //   上游把「请求任务 ID」按这个 session_id 校验 6–64 字符；空串或短 hash 会触发
+      //   400 {"code":1214,"msg":"The request task ID length must be between 6 and 64 characters"}。
+      //   故两边共用外层的 zcSid（chat 入口算一次），绝不各自算。
       payload.metadata = {
         user_id: JSON.stringify({
           device_id: mid || undefined,
           account_uuid: "",
-          session_id: cleanSessionId,
+          session_id: zcSid,
         }),
       };
       // 产出追踪：包一层 emit 观察 bridge 是否产出过「客户端可消费」的内容（正文/思考/工具调用）。
