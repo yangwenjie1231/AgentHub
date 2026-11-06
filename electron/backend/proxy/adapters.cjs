@@ -4206,6 +4206,31 @@ const zcode = {
   async chat({ account, secrets, model, body, emit, meta }) {
     const c = this.cfg();
     const convId = (meta && meta.conversationId) || util.stableConvId(body && body.messages) || "";
+    // 三段式 system 的第三块要带「工作环境」段（官方 environment 形状）。
+    // 取官方客户端会看到的信息：工作目录 / 是否 git 仓 / 平台 / 系统版本。
+    // 取不到就不写那几行——不编造（多写的行同样会让形状偏离）。
+    const zcodeEnvInfo = (() => {
+      const nodeOs = require("node:os");
+      const nodeFs = require("node:fs");
+      const nodePath = require("node:path");
+      const info = { platform: process.platform };
+      try { info.osVersion = nodeOs.release(); } catch { /* ignore */ }
+      try {
+        const d = (meta && meta.workDir) || process.cwd();
+        if (d) {
+          info.cwd = d;
+          let cur = d;
+          for (let i = 0; i < 6; i++) {
+            if (nodeFs.existsSync(nodePath.join(cur, ".git"))) { info.isGitRepo = true; break; }
+            const up = nodePath.dirname(cur);
+            if (up === cur) break;
+            cur = up;
+          }
+          if (info.isGitRepo == null) info.isGitRepo = false;
+        }
+      } catch { /* ignore */ }
+      return info;
+    })();
     const doChat = async (plan) => {
       const provider = String((account && account.meta && account.meta.provider) || "zai");
       const base = plan === "coding-plan"
@@ -4226,9 +4251,18 @@ const zcode = {
       const payload = zcodeAnthropic.toAnthropic(upstreamModel, body, {
         defaultMaxTokens: zmeta && zmeta.maxOutputTokens,
       });
-      // 官方客户端检测：zcode-plan 端点要求 system 以官方 ZCode 提示词开头，否则返回 405/3012
-      // unusual activity（见 zcodeOfficialSystem.cjs）。coding-plan 走另一上游，无需注入。
-      if (plan === "start-plan") payload.system = zcodeOfficialSystem.injectOfficialZcodeSystem(payload.system);
+      // 官方客户端检测（2026-11-06 重做）：start-plan 端点自 11-03 起要求**严格三段式**
+      // 官方 system（3.17.2 文本 + 3 个 cache_control block），不是「前缀拼在最前面」。
+      // 实测对照（同机同号）：旧前缀法 → 405/3012；三段式 → 200；文本对但单块 → 依旧 3012。
+      // coding-plan 走另一上游，无需注入。见 zcodeOfficialSystem.cjs。
+      if (plan === "start-plan") {
+        payload.system = zcodeOfficialSystem.injectOfficialSystemBlocks(payload.system, {
+          model: upstreamModel,
+          provider: provider === "bigmodel" ? "bigmodel-api" : "zai-api",
+          hasSkillTool: Array.isArray(payload.tools) && payload.tools.some((t) => t && t.name === "Skill"),
+          envInfo: zcodeEnvInfo,
+        });
+      }
       // 官方流量规范（zcode-api E2e/UIo 逆向实证）：无论 coding-plan 还是 start-plan，
       // 官方客户端发送给 Anthropic 协议的 metadata.user_id 必须是特定结构的 JSON 字符串：
       // {"device_id":"<deviceMid>","account_uuid":"","session_id":"<sessionId>"}
@@ -4271,6 +4305,25 @@ const zcode = {
         }
         throw e;
       }
+      // ⚠ 上游业务错误可能以 **HTTP 200 + JSON body** 返回（不是 SSE），例如额度未生效：
+      //   HTTP 200  {"code":1005,"msg":"exceed quota limit","logid":"..."}
+      // 这种响应 pumpSse 解析不出任何事件 → 被当成「空流」抛 502，丢失 1005=额度 语义。
+      // 故在交给 SSE 泵之前先探一次：content-type 是 JSON（非 event-stream）就整体读出来按业务错处理。
+      const zcCtype = String((respPair.resp.headers && respPair.resp.headers.get && respPair.resp.headers.get("content-type")) || "");
+      if (zcCtype && !/event-stream/i.test(zcCtype)) {
+        let zcRaw = "";
+        try { zcRaw = await respPair.resp.text(); } catch { /* ignore */ }
+        const zcData = parseJson(zcRaw);
+        const zcMapped = zcodeMapBizError(200, zcData, zcRaw);
+        if (zcMapped && (zcMapped.planLimit || zcMapped.code)) {
+          if (zcMapped.planLimit) result.planLimit = true;
+          const err = new Error(zcMapped.message);
+          err.status = zcMapped.status;
+          if (zcMapped.code) err.code = zcMapped.code;
+          err.zcodePlan = plan;
+          throw err;
+        }
+      }
       // 同上：首个 SSE 事件到达即清 30s 首字节定时器，否则长回答（>30s）会在流中途被 abort
       let zcSettled = false;
       try {
@@ -4299,6 +4352,18 @@ const zcode = {
       //   · sawError（bridge.result 已提供）：上游已给出具体错误事件 → 必须交由 classifyUpstream
       //     按其 code 分类（如 4001 模型配置为空属 model_config，**不罚号**）。若被空流判定抢先抛
       //     502，这类「有 error 事件但无正文」的响应会被误归为 server 类而罚号。
+      // ⚠ planLimit 不能在此静默 return，否则上游明确报的 1005（额度耗尽）会被当成
+      //    「200 + 空内容」返回给客户端。实测（2026-11-06）：start-plan 在额度未到
+      //    effective_at 时返回 HTTP 200 + {"code":1005,"msg":"exceed quota limit"}，
+      //    若这里直接放行，客户端只看到空回复、号池也拿不到 402 语义。
+      //    故 planLimit 时也抛，交给 classifyUpstream 归 402 → coolAccount("credit")。
+      if (result.planLimit && !zcProduced) {
+        throw Object.assign(new Error(bridge.result.planLimitMsg || "上游返回 1005：额度不足或额度尚未生效（ZCode Weekend Build 等赠送计划有 effective_at 延迟）"), {
+          status: 402,
+          planLimit: true,
+          emptyStream: true,
+        });
+      }
       if (!result.planLimit && !bridge.result.sawError && (!zcSettled || !zcProduced)) {
         throw Object.assign(new Error(zcSettled
           ? "上游返回了事件但没有任何可用内容（空响应，通常为余额耗尽/账号被限）"

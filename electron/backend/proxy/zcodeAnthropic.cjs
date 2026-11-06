@@ -188,7 +188,7 @@ function createSseBridge(emit) {
   let cacheReadTokens = 0;
   let cacheCreationTokens = 0;
   let stopReason = "";
-  const result = { planLimit: false, sawError: false };
+  const result = { planLimit: false, planLimitMsg: "", sawError: false };
 
   const finishReasonMap = (r) => {
     const s = String(r || "");
@@ -292,7 +292,10 @@ function createSseBridge(emit) {
       // 额度耗尽语义：402 / 1005 / 上游欠费文案（1113 Insufficient balance 等实测形态）→ planLimit
       const isQuota = code === 1005 || code === 1113 || /insufficient|quota|balance|余额|额度|recharge/i.test(message);
       const status = isQuota ? 402 : code === 3007 ? 502 : code >= 3002 && code <= 3010 ? 429 : 502;
-      if (isQuota) result.planLimit = true;
+      if (isQuota) {
+        result.planLimit = true;
+        result.planLimitMsg = message;
+      }
       result.sawError = true;
       emit({ type: "error", status, code, message });
       return;

@@ -85,6 +85,8 @@ jobs:
           run_sbx tools/proxy-rules-identity-sync-selftest.cjs
           # 零宽字符（U+200B 等）统一剥离：emit 出口一处覆盖所有渠道
           run_sbx tools/proxy-zero-width-selftest.cjs
+          # ZCode start-plan 三段式 system（3.17.2）+ 1005 分类
+          run_sbx tools/proxy-zcode-startplan-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest

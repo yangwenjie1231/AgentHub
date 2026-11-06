@@ -161,7 +161,115 @@ function injectOfficialZcodeSystem(system) {
   return system ? prefix + "\n\n" + system : prefix;
 }
 
+/**
+ * ===== 3.17.2 三段式构造（2026-11-06 实测，唯一能过 3012 的形状）=====
+ *
+ * 背景：2026-11-03 起上游风控再收紧。实测三组对照（同机同号同额度）：
+ *   A. 旧实现（3.14.4 文本 + 单块前缀拼接）           → 405/3012
+ *   B. 3.17.2 文本 + **严格三段式 cache_control 块**   → 200 ✅
+ *   C. 3.17.2 文本但**单块**拼接                      → 405/3012
+ * 结论：**文本要对（3.17.2）+ 形状要对（三段式）**，缺一不可。
+ *   之前「前缀匹配、拼在 system 最前」的做法在 3.17.2 上完全失效。
+ *
+ * 官方形状（ZCode 3.17.2 ContextBuilder.assembleSystemMessages，实测复现）：
+ *   system = [
+ *     { type:"text", text: cliPrefix,                    cache_control:{type:"ephemeral"} },
+ *     { type:"text", text: stableSections.join("\n\n"),   cache_control:{type:"ephemeral"} },
+ *     { type:"text", text: "\n\n" + dynamic.join("\n\n"), cache_control:{type:"ephemeral"} },
+ *   ]
+ *   · **禁止第 4 块**（实测：第 4 块 → 405/3012，见 oc-auth #343）
+ *   · 前两块必须与官方逐字节一致；第三块是动态段，客户端自有 system 拼在最后
+ *
+ * 来源：player462/opencode-zcode-auth 0.1.52 的 prompt.mjs，
+ *   其文本取自 ZCode 3.17.2 源码（a9fe401，apps/zcode-cli/packages/core/src/context/）。
+ */
+const PROMPT_3172 = require("./zcodeSystemPrompt.json");
+
+/** 三段式要求的 fixed 文本指纹（用于自测：文本被误改会导致线上全挂） */
+const PROMPT_VERSION = "3.17.2";
+
+const EPHEMERAL = { type: "ephemeral" };
+
+/** 环境段（第三块的一部分）：工作目录 / 是否 git 仓 / 平台。
+ *  形状取自 oc-auth 的 environment()：逗号分行的 Key: Value。 */
+function buildEnvironmentSection(info) {
+  const e = PROMPT_3172.environment || {};
+  const i = info || {};
+  const lines = [];
+  if (e.heading) lines.push(e.heading);
+  if (i.cwd) lines.push(`${e.cwdLabel || "Working directory"}: ${i.cwd}`);
+  if (i.isGitRepo != null) lines.push(`${e.gitLabel || "Is git repo"}: ${i.isGitRepo ? (e.gitYes || "yes") : (e.gitNo || "no")}`);
+  if (i.platform) lines.push(`${e.platformLabel || "Platform"}: ${i.platform}`);
+  if (i.osVersion) lines.push(`${e.osVersionLabel || "OS Version"}: ${i.osVersion}`);
+  if (e.untrustedNote) lines.push(e.untrustedNote);
+  return lines.join("\n");
+}
+
+/**
+ * 把「客户端自己的 system」包成官方三段式。
+ *
+ * @param {string|Array} ownSystem  客户端原本的 system（string 或 text block 数组）
+ * @param {object} opts
+ * @param {string} opts.model       上游模型名（用于 "powered by" 那句）
+ * @param {string} opts.provider    "bigmodel-api" | "zai-api"
+ * @param {object} opts.envInfo     buildEnvironmentSection 的输入（cwd/isGitRepo/platform/osVersion）
+ * @param {boolean} opts.hasSkillTool 请求里是否有名为 Skill 的工具（决定是否加 sessionGuidance）
+ * @returns {Array} 三个 cache_control text block
+ */
+function buildOfficialSystemBlocks(ownSystem, opts) {
+  const o = opts || {};
+  const own = [];
+  if (typeof o.primary === "string" || typeof ownSystem === "string") {
+    const s = typeof ownSystem === "string" ? ownSystem : String(o.primary || "");
+    if (s.trim()) own.push(s);
+  } else if (Array.isArray(ownSystem)) {
+    for (const b of ownSystem) {
+      if (b && b.type === "text" && typeof b.text === "string" && b.text.trim()) own.push(b.text);
+    }
+  }
+
+  const provider = o.provider || "bigmodel-api";
+  const model = o.model || "";
+  const dynamic = [
+    PROMPT_3172.dynamicBehavior,
+    ...(o.hasSkillTool ? [PROMPT_3172.sessionGuidance] : []),
+    buildEnvironmentSection(o.envInfo),
+    ...(model ? [String(PROMPT_3172.poweredBy).replace("{provider}", provider).replace("{model}", model)] : []),
+    PROMPT_3172.contextManagement,
+    ...own,
+  ].filter((s) => typeof s === "string" && s.length);
+
+  return [
+    { type: "text", text: PROMPT_3172.cliPrefix, cache_control: EPHEMERAL },
+    { type: "text", text: PROMPT_3172.stableSections.join("\n\n"), cache_control: EPHEMERAL },
+    { type: "text", text: "\n\n" + dynamic.join("\n\n"), cache_control: EPHEMERAL },
+  ];
+}
+
+/** 三段式是否已是目标形状（防重复包装：system 已是 3 块且首块等于 cliPrefix） */
+function isOfficialSystemBlocks(system) {
+  if (!Array.isArray(system) || system.length !== 3) return false;
+  const first = system[0];
+  return !!(first && typeof first.text === "string" && first.text === PROMPT_3172.cliPrefix);
+}
+
+/**
+ * 官方形状注入（**新的默认入口**）：把客户端 system 包成 3.17.2 三段式。
+ * 与旧 injectOfficialZcodeSystem 的区别：这个会**替换**整个 system，不是追加前缀——
+ * 因为上游要求严格三段，多一块就 3012。
+ */
+function injectOfficialSystemBlocks(system, opts) {
+  if (isOfficialSystemBlocks(system)) return system;
+  return buildOfficialSystemBlocks(system, opts);
+}
+
 module.exports = {
+  PROMPT_3172,
+  PROMPT_VERSION,
+  buildOfficialSystemBlocks,
+  buildEnvironmentSection,
+  isOfficialSystemBlocks,
+  injectOfficialSystemBlocks,
   FALLBACK_PREFIX,
   MIN_VALID_LENGTH,
   extractFromBundle,
