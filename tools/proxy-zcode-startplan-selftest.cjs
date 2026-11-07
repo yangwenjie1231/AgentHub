@@ -130,7 +130,7 @@ console.log("6. 源码契约");
   ok("start-plan 走 injectOfficialSystemBlocks", /injectOfficialSystemBlocks\(payload\.system/.test(ad));
   ok("不再用旧的前缀注入（start-plan）", !/if \(plan === "start-plan"\) payload\.system = zcodeOfficialSystem\.injectOfficialZcodeSystem/.test(ad));
   ok("传了 model 给三段式", /injectOfficialSystemBlocks\(payload\.system,\s*\{[\s\S]{0,300}model: upstreamModel/.test(ad));
-  ok("planLimit 不再静默放行", /if \(result\.planLimit && !zcProduced\)/.test(ad));
+  // planLimit 在 SSE 流里不直接抛，交由 server 分类器（T25d 契约）；HTTP200+JSON 那条走 zcCtype 分支
   // HTTP 200 + JSON 业务错（额度未生效就是这样）必须先于 SSE 泵被判出来
   ok("先探 content-type 再交给 SSE 泵", /!\/event-stream\/i\.test\(zcCtype\)/.test(ad));
   ok("HTTP200 的 JSON 走 zcodeMapBizError", /zcodeMapBizError\(200, zcData, zcRaw\)/.test(ad));

@@ -231,6 +231,23 @@ const RETRY_SAME_DEFAULT_COUNT = 1;      // 默认重发 1 次
 const RETRY_SAME_DEFAULT_INTERVAL_MS = 1000; // 默认退避间隔 1s
 const RETRY_SAME_MIN_INTERVAL_MS = 200;  // 间隔下限（防 0ms 忙等）
 const RETRY_SAME_MAX_INTERVAL_MS = 10000; // 间隔上限
+/**
+ * 上游「在途并发已满」的等待序列（毫秒），合计约 10 秒。
+ *
+ * 适用错误：zcode 的 3008「user concurrency limit exceeded」、
+ *           3009「model concurrency limit exceeded」（其它渠道若出现同类语义也可复用）。
+ *
+ * 语义区别很重要：这类 429 **不是失败**，是「这次还没轮到你」——
+ * 请求内容完全合法，等一会儿原样重发就能拿到结果。
+ * 若按普通 429 只重试 1 次就落冷却，用户会频繁看到「渠道冷却中」，
+ * 而实际上游只是并发忙。
+ *
+ * 参数取自 player462/opencode-zcode-auth 的实测实现
+ * （BUSY_WAITS = [250, 500, 900, 1600, 2800, 4000]）：
+ * 递进而不是固定间隔——前几次快速试探（多数情况 250~900ms 就空出槽位），
+ * 后几次拉长避免无谓打点；总时长约 10s，超过即判定「真饱和」交给冷却/换号。
+ */
+const BUSY_WAITS_MS = [250, 500, 900, 1600, 2800, 4000];
 
 /** 同账号原地重发次数：settings.retrySameAccountCount 显式配置（含 0 = 关闭）时按配置
  * （封顶 RETRY_SAME_MAX_COUNT），缺省/非法回退 RETRY_SAME_DEFAULT_COUNT。
@@ -436,7 +453,23 @@ function classifyUpstream(e, planLimit, channel, model) {
   if (e && e.status === 429) {
     // resetMs 统一为绝对时刻：parseRateResetMs 本就返回墙钟；retryAfterMs 是剩余时长，必须换算。
     // 二者混装会让 coolAccountMs 把时长当时刻，Retry-After: 7200 被 Math.max(now+1s) 兜成 1s 冷却（墙钟对齐失效）
-    return { kind: "rate", switchable: true, status: 429, resetMs: parseRateResetMs(msg) || (e.retryAfterMs ? Date.now() + e.retryAfterMs : 0) };
+    //
+    // busyCode：识别「在途并发已满」族（zcode 3008 user / 3009 model concurrency limit exceeded）。
+    // 这类 429 不是失败、也不是限流窗口，而是「还没轮到你」——必须走递进等待重试，
+    // 绝不能按普通 429 冷却账号（那会让用户频繁看到「渠道冷却中」而上游其实只是忙）。
+    // 双通道判定：code 字段 或 消息文本（部分渠道把码塞在文案里）。
+    // 适配器可在 Error 上直接带 busyCode（zcode 的 zcodeMapBizError 就会），优先采信它，
+    // 避免各渠道把码藏在不同字段时漏判。
+    const busyCode = Number(e && e.busyCode) || ([3008, 3009].includes(code) ? code
+      : /\b(3008|3009)\b/.test(msg) || /concurrency limit exceeded/i.test(msg) ? (code || 3008)
+        : 0);
+    return {
+      kind: "rate",
+      switchable: true,
+      status: 429,
+      resetMs: parseRateResetMs(msg) || (e.retryAfterMs ? Date.now() + e.retryAfterMs : 0),
+      busyCode,
+    };
   }
   if (e && e.status === 401) return { kind: "relogin", switchable: true, status: 401 };
   if (e && e.status === 404) return { kind: "not_found", switchable: true, status: 404 }; // 短冷却不累计，防雪崩
@@ -1031,6 +1064,7 @@ async function handleChat(req, res, settings, surface, convNotes) {
         const tried = new Set();
         const triedAccountNames = []; // 本渠道实际选中的账号名（最终错误文案用；去重保序）
         const rateRetried = new Set(); // 无明示时间的 429 同号退避重试标记（每号限一次）
+        const busyRetried = new Map(); // 「在途并发已满」（3008/3009）同号递进重试计数：accId → 已试次数
         const transientRetried = new Map(); // 瞬时错误（5xx/网络/超时）同账号原地重发计数：accId → 已重发次数
         // 每账号并发租约：expire_first 排序与并发无关，同窗口并发会话否则全打同一账号（租约语义）
         // 渠道级上限优先（rules.headers.json 的 <channel>.maxInFlightPerAccount）：
@@ -1244,6 +1278,28 @@ async function handleChat(req, res, settings, surface, convNotes) {
             // 无明示重置时间的 429：上游多为 1~3s 短窗限流，退避 1s 重试一次再落冷却换号
             // （RetrySame 语义）；有墙钟/Retry-After 的 429 重试必白费，直接冷却。
             // 单号池场景下这一跳决定 429 是就地消化还是直接抛给客户端
+            //
+            // ⚠ 「在途并发已满」单独一档（2026-11-07 实测 + oc-auth 权威实现）：
+            //   zcode 的 3008/3009（user/model concurrency limit exceeded）**不是失败**，
+            //   而是「还没轮到你」——请求本身没问题，等一会儿原样重发就能拿到。
+            //   若按普通 429 只重试 1 次/1s 就落冷却，用户会频繁看到「渠道冷却中」，
+            //   而实际上游只是忙。官方实现（player462/opencode-zcode-auth）给出实测参数：
+            //     BUSY_WAITS = [250, 500, 900, 1600, 2800, 4000]   // 合计约 10s
+            //   超过这组等待才算真饱和，此时再交给冷却/换号。
+            //   判据用 cls.busyCode（由 classifyError 打标，3008/3009）。
+            const busies = BUSY_WAITS_MS.length;
+            const busyUsed = busyRetried.get(acc.id) || 0;
+            if (cls.kind === "rate" && !cls.resetMs && cls.busyCode && busyUsed < busies) {
+              busyRetried.set(acc.id, busyUsed + 1);
+              tried.delete(acc.id); // 不罚号：只是没轮到，允许重新选中本号
+              attempt--;
+              const busyDelay = Math.round(BUSY_WAITS_MS[busyUsed] * (0.85 + Math.random() * 0.3));
+              oplog.log("info", "代理重试",
+                `上游并发已满（${String(cls.busyCode)} 还没轮到），${busyDelay}ms 后原样重发（第 ${busyUsed + 1}/${busies} 次）`,
+                { channel: chan, target: acc.name });
+              await new Promise((r) => setTimeout(r, busyDelay));
+              continue;
+            }
             if (cls.kind === "rate" && !cls.resetMs && !rateRetried.has(acc.id)) {
               rateRetried.add(acc.id);
               tried.delete(acc.id); // 允许重新选中本号（多号池防惊群可能让位别的号，同样不罚号）

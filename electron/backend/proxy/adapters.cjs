@@ -4172,7 +4172,13 @@ function zcodeMapBizError(status, data, text) {
   if (status === 402 || code === 1005 || code === 1113 || /insufficient|quota exhausted|balance|余额不足|额度|recharge/i.test(msg)) {
     return { status: 402, planLimit: true, message: msg || "额度已用完" };
   }
-  if (status === 429 || [3002, 3008, 3009, 3010].includes(code)) return { status: 429, message: msg || "上游限流" };
+  // 3008/3009 是「在途并发已满」——不是失败也不是限流窗口，而是「还没轮到你」。
+  // 必须带 busyCode 出去，让 server.cjs 走递进等待重试（BUSY_WAITS_MS 约 10s），
+  // 而不是按普通 429 冷却账号（否则用户会频繁看到「渠道冷却中」，上游其实只是忙）。
+  if ([3008, 3009].includes(code) || /concurrency limit exceeded/i.test(msg)) {
+    return { status: 429, busyCode: [3008, 3009].includes(code) ? code : 3008, message: msg || "上游在途并发已满" };
+  }
+  if (status === 429 || [3002, 3010].includes(code)) return { status: 429, message: msg || "上游限流" };
   const isCaptcha = code === 3007 || /captcha|verify/i.test(msg) || /"code"\s*:\s*3007/.test(String(text || ""));
   if (isCaptcha) {
     return { status: 502, code: 3007, needCaptcha: true, message: "触发上游人机校验（阿里云验证码）：请在号池列表中点击该账号的「过码」按钮完成验证" };
@@ -4346,6 +4352,9 @@ const zcode = {
           const err = new Error(mapped.message);
           err.status = mapped.status;
           if (mapped.code) err.code = mapped.code;
+          // 3008/3009：把 busyCode 带出去，server.cjs 据此走「还没轮到」的递进等待重试，
+          // 而不是当普通 429 冷却账号。
+          if (mapped.busyCode) err.busyCode = mapped.busyCode;
           err.zcodePlan = plan;
           throw err;
         }
@@ -4366,6 +4375,7 @@ const zcode = {
           const err = new Error(zcMapped.message);
           err.status = zcMapped.status;
           if (zcMapped.code) err.code = zcMapped.code;
+          if (zcMapped.busyCode) err.busyCode = zcMapped.busyCode;
           err.zcodePlan = plan;
           throw err;
         }
@@ -4403,13 +4413,12 @@ const zcode = {
       //    effective_at 时返回 HTTP 200 + {"code":1005,"msg":"exceed quota limit"}，
       //    若这里直接放行，客户端只看到空回复、号池也拿不到 402 语义。
       //    故 planLimit 时也抛，交给 classifyUpstream 归 402 → coolAccount("credit")。
-      if (result.planLimit && !zcProduced) {
-        throw Object.assign(new Error(bridge.result.planLimitMsg || "上游返回 1005：额度不足或额度尚未生效（ZCode Weekend Build 等赠送计划有 effective_at 延迟）"), {
-          status: 402,
-          planLimit: true,
-          emptyStream: true,
-        });
-      }
+      // ⚠ 这里**不要**因 planLimit 直接抛：上游在 SSE 流里发 error 事件（如 1005 /
+      //   insufficient balance）时，语义应由 server.cjs 的分类器按 planLimit 处理
+      //   （→ coolAccount("credit") 到次日 04:00）。若在此抢先抛，planLimit 标志会丢，
+      //   变成普通 402/502 冷路径，与 T25d 的既有约定冲突。
+      //   真正需要抛的是「HTTP 200 + JSON body」（非 SSE）那条路径——见上方 zcCtype 分支，
+      //   那里已按 zcodeMapBizError 完整处理。
       if (!result.planLimit && !bridge.result.sawError && (!zcSettled || !zcProduced)) {
         throw Object.assign(new Error(zcSettled
           ? "上游返回了事件但没有任何可用内容（空响应，通常为余额耗尽/账号被限）"

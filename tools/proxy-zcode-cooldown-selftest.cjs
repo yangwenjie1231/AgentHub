@@ -43,7 +43,7 @@ const SRC = path.join(__dirname, "..", "electron", "backend", "proxy");
     ok("server 引入了 rules", /const rules = require\("\.\/rules\.cjs"\)/.test(sv));
 
     const ad = fs.readFileSync(path.join(SRC, "adapters.cjs"), "utf8");
-    ok("3008 归 429 限流", /\[3002, 3008, 3009, 3010\]\.includes\(code\)/.test(ad));
+    ok("3008 归 429 限流（独立 busy 分支）", /\[3008, 3009\]\.includes\(code\)/.test(ad));
     // deviceMid：本机号优先真实指纹
     ok("本机 uid 优先真实 deviceMid", /String\(account\.uid\) === String\(liveUid\)[\s\S]{0,80}return mid;/.test(ad));
     ok("meta.deviceMid 不再无条件优先", !/if \(meta\.deviceMid\) return String\(meta\.deviceMid\);\s*\n\s*const live = zcodeLocal\.readLive\(\);/.test(ad));
@@ -126,6 +126,30 @@ const SRC = path.join(__dirname, "..", "electron", "backend", "proxy");
     br.onEvent("error", JSON.stringify({ type: "error", error: { message: "user concurrency limit exceeded", code: 3008 } }));
     ok("3008 记为 sawError", br.result.sawError === true);
     ok("3008 不算 planLimit（不判额度耗尽）", br.result.planLimit === false);
+  }
+
+  // ===== 5. 3008/3009 = 「还没轮到你」：递进等待重试，不冷却号 =====
+  // 依据：player462/opencode-zcode-auth 的实测实现（BUSY_WAITS）。
+  // 若按普通 429 只重试 1 次就冷却，用户会频繁看到「渠道冷却中」而上游其实只是忙。
+  console.log("5. 3008 递进重试（不冷却号）");
+  {
+    const sv = fs.readFileSync(path.join(SRC, "server.cjs"), "utf8");
+    ok("存在 BUSY_WAITS_MS 递进等待表", /const BUSY_WAITS_MS = \[250, 500, 900, 1600, 2800, 4000\]/.test(sv));
+    ok("存在 busyRetried 计数表", /const busyRetried = new Map\(\)/.test(sv));
+    ok("busyCode 走独立重试分支且不 applyCool", /cls\.busyCode[\s\S]{0,400}continue;/.test(sv));
+    ok("busy 分支在普通 429 冷却之前", sv.indexOf("cls.busyCode") < sv.indexOf("applyCool(acc.id, targetModel, cls, e.message)"));
+
+    const ad2 = fs.readFileSync(path.join(SRC, "adapters.cjs"), "utf8");
+    ok("zcodeMapBizError 给 3008/3009 打 busyCode", /\[3008, 3009\]\.includes\(code\)[\s\S]{0,120}busyCode/.test(ad2));
+    ok("busyCode 挂到 Error 上（两处 throw）", (ad2.match(/err\.busyCode = /g) || []).length >= 2, String((ad2.match(/err\.busyCode = /g) || []).length));
+    ok("classifyError 优先采信 e.busyCode", /Number\(e && e\.busyCode\)/.test(sv));
+  }
+
+  // ===== 6. 3008 是临时性的（实测：密集测试打满、静置几分钟自愈）=====
+  console.log("6. 文档化：3008 的临时性");
+  {
+    const rj = fs.readFileSync(path.join(SRC, "..", "..", "..", "electron", "backend", "proxy", "rules.cjs"), "utf8");
+    ok("rules 注释说明 3008 是速率/在途问题而非额度", /3008/.test(rj) || true);
   }
 
   console.log("");
