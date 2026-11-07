@@ -552,6 +552,17 @@ const DEFAULTS = {
       oauthProvider: "zai",
       // 平台标识（billing/claim 查询参数 platform 的值）
       platform: "win32-x64",
+      // ===== 上游并发限制（2026-11-07 实测，必须保留）=====
+      // zcode 服务端按**账号 + 设备指纹**做在途并发记账，超限直接：
+      //   429 {"code":3008,"msg":"user concurrency limit exceeded"}
+      // 触发后该账号进入 cooling，渠道页显示「冷却中」。
+      // 实测：同一凭据、同一 deviceMid，间隔 15s 单发 3 次全 200；
+      //       连续 1.5s 间隔则稳定撞 3008。故这是**速率/在途数**问题，不是额度或风控。
+      // 官方客户端是单会话串行，故这里取 1：宁可排队也不要罚号。
+      // 用户若把全局 proxy.concurrency 调大，本值仍会按号生效（更严的优先）。
+      maxInFlightPerAccount: 1,
+      // 撞 3008 后的退避（毫秒），逐次翻倍，上限由 server 侧冷却兜底
+      concurrencyBackoffMs: 2000,
     },
     // ===== Qoder 双区 =====
     // 端点与版本常量放配置（热加载）：客户端升级后只需改 cosyVersion，无需改代码。

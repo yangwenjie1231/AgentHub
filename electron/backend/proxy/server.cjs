@@ -24,6 +24,7 @@ const pool = require("./pool.cjs");
 const adapters = require("./adapters.cjs");
 const provider = require("./provider.cjs");
 const util = require("./util.cjs");
+const rules = require("./rules.cjs");
 const desensitize = require("./desensitize.cjs");
 const openaiOut = require("./protocols/openai-out.cjs");
 const anthropicIn = require("./protocols/anthropic-in.cjs");
@@ -1032,7 +1033,16 @@ async function handleChat(req, res, settings, surface, convNotes) {
         const rateRetried = new Set(); // 无明示时间的 429 同号退避重试标记（每号限一次）
         const transientRetried = new Map(); // 瞬时错误（5xx/网络/超时）同账号原地重发计数：accId → 已重发次数
         // 每账号并发租约：expire_first 排序与并发无关，同窗口并发会话否则全打同一账号（租约语义）
-        const perAccountLimit = Number(settings.concurrencyPerAccount) > 0 ? Number(settings.concurrencyPerAccount) : 3;
+        // 渠道级上限优先（rules.headers.json 的 <channel>.maxInFlightPerAccount）：
+        // 有些上游按账号做**在途并发**记账，超限直接 429 并冷却号（zcode 的 code 3008
+        // "user concurrency limit exceeded" 实测即此）。这种渠道必须比全局更严，
+        // 否则 DSH 这类长上下文客户端几个并发就把号打凉。
+        const chLimit = Number(
+          (rules.get("headers.json") || {})[chan] && (rules.get("headers.json") || {})[chan].maxInFlightPerAccount
+        );
+        const perAccountLimit = Number(chLimit) > 0
+          ? Number(chLimit)
+          : Number(settings.concurrencyPerAccount) > 0 ? Number(settings.concurrencyPerAccount) : 3;
         // 积分保底（issue #157）：余额低于阈值的账号不接**确认收费**的模型，
         // 把最后一点余额留给免费模型。默认 0 = 关闭，行为与引入前一致。
         pool.setCreditFloor(Number(settings.creditFloor) > 0 ? Number(settings.creditFloor) : 0);

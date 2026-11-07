@@ -87,6 +87,8 @@ jobs:
           run_sbx tools/proxy-zero-width-selftest.cjs
           # ZCode start-plan 三段式 system（3.17.2）+ 1005 分类
           run_sbx tools/proxy-zcode-startplan-selftest.cjs
+          # ZCode 冷却根因：deviceMid 优先级 / 每账号并发上限 / 3008 分类
+          run_sbx tools/proxy-zcode-cooldown-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest

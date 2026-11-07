@@ -4091,13 +4091,25 @@ function zcodeDeviceMid() {
  */
 function resolveAccountDeviceMid(account) {
   const meta = (account && account.meta) || {};
-  if (meta.deviceMid) return String(meta.deviceMid);
   const live = zcodeLocal.readLive();
   const liveUid = live && (zcodeLocal.uidFromJwt(live.jwt) || (live.codingPlanKeys[0] && live.codingPlanKeys[0].uid));
   const mid = zcodeDeviceMid();
-  if (mid && account && account.uid && liveUid && account.uid === liveUid) {
+  // ⚠ 优先级修正（2026-11-07 实测）：**本机真实 deviceMid 必须排在 meta.deviceMid 之前**。
+  //
+  // 原实现让 meta.deviceMid 无条件优先，导致本机号（uid 与客户端 JWT 同一个）也被换成
+  // 派生指纹 c1acefd8-…，而上游服务端是按 **deviceMid** 做账号级并发记账的：
+  // 同一个 JWT（同一账号）从「派生指纹」发请求，服务端视为另一台设备，
+  // 于是并发计数被拆成两份、互不等待 → 稳定触发
+  //   429 "user concurrency limit exceeded" → coolAccount → 渠道显示「冷却中」。
+  // 实测对照：本机真实指纹 158e3da5-… 直连正常出 token；派生指纹则反复撞该限。
+  //
+  // 因此：**账号 uid 等于本机客户端 uid 时，一律用本机真实 deviceMid**
+  //       （这正是官方客户端自己的指纹，服务端认得，并发记账才对得上）。
+  //       只有「非本机账号」（导入的别人的号）才用派生指纹，避免多账号同指纹关封。
+  if (mid && account && account.uid && liveUid && String(account.uid) === String(liveUid)) {
     return mid;
   }
+  if (meta.deviceMid) return String(meta.deviceMid);
   if (account && (account.uid || account.id)) {
     const h = crypto.createHash("sha256").update(`zcode-device:${account.uid || account.id}`).digest("hex");
     return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
@@ -4108,7 +4120,7 @@ function resolveAccountDeviceMid(account) {
 /** 控制面身份头组（billing/claim/configs：带 X-Device-Mid，不带 X-ZCode-Agent）。
  *  deviceMid 采用账号级专属指纹，避免多账号并发同指纹触发上游设备关联封控 */
 function zcodeCtlHeaders(c, secrets, account) {
-  const ver = c.appVersion || "4.1.10";
+  const ver = c.appVersion || "3.17.2";
   const h = {
     "content-type": "application/json",
     accept: "application/json",
