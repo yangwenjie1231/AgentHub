@@ -121,8 +121,14 @@ async function main() {
     assert(h["x-agent-type"] === "main", "带 x-agent-type: main", h["x-agent-type"]);
     assert(h["x-product"] === "SaaS", "x-product = SaaS", h["x-product"]);
     assert(h["x-private-data"] === "true", "带 x-private-data: true", h["x-private-data"]);
-    assert(h["x-ide-version"] === "5.8.4", "x-ide-version = 5.8.4", h["x-ide-version"]);
-    assert(/^WorkBuddy\/5\.8\.4 workbuddy-ai\/5\.8\.4 CLI\/2\.161\.0/.test(String(h["user-agent"])), "UA 对齐官方三段式", h["user-agent"]);
+    // 版本号不写死（上游持续轮换）：只要求「出站头与配置一致」——配置是唯一真值来源，
+    // 具体值由 rules.DEFAULTS 与 clientVersion.cjs 的在线自检盯
+    const wantAi = require("../electron/backend/proxy/rules.cjs").DEFAULTS["headers.json"].workbuddy_ai;
+    assert(h["x-ide-version"] === wantAi.clientVersion, `x-ide-version = 配置的 clientVersion（${wantAi.clientVersion}）`, h["x-ide-version"]);
+    assert(
+      String(h["user-agent"]).startsWith(`WorkBuddy/${wantAi.clientVersion} workbuddy-ai/${wantAi.clientVersion} CLI/${wantAi.cliVersion}`),
+      "UA 对齐官方三段式", h["user-agent"]
+    );
     assert(h["x-codebuddy-request"] === "1", "带 x-codebuddy-request");
     assert(h["x-domain"] === "www.workbuddy.ai", "x-domain = www.workbuddy.ai", h["x-domain"]);
     assert(h["x-user-id"] === "u-e2e-0001", "带 x-user-id");

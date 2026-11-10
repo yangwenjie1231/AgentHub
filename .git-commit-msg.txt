@@ -1,0 +1,37 @@
+fix(proxy): 11140 改为「看到即停手」+ 整池连坐暂停（上游 11 月收紧风控）
+
+现象：2026-11-10 起本机 3 个 workbuddy_ai 账号同批被 11140 拦死；同日 CN 区仍正常。
+线上库与官方侧实测确定了三件事：
+
+1. 11140 与提问内容/请求头/客户端版本**全无关**（同 body 换号即 200，同号换任何 body
+   仍 403，同号 /v3/config 与计费端点照常 200）——旧版把它当「可换号」处理，
+   在同一个请求内逐个号打到池底。社区实测那正是加重设备连坐的动作
+   （workbuddy2api-hub #422：一个任务里连封 7 个号；#629/#641「国际版全体阵亡」）。
+2. displayMsg 已从「内容未通过安全审核」换成「账号存在异常行为，已被限制使用」；
+   而「重新登录」这条建议是错的——重登/申诉工单/注销重注册实测都解不开
+   （#659），只有上游限制窗口自然到期。旧文案把用户引向一条走不通的路。
+3. 官方客户端已到 5.9.4（国际）/ 5.9.3（国内），CLI 2.182.0；仓库配置还停在
+   5.8.4/5.5.6 + 2.161.0，且缺 5.9.x 新增的 X-Client-* 头族。
+
+改动：
+
+- server.cjs：新增 accountBlockedStop() —— 被拦即停手（默认 wbRestrictedRotateMax=0），
+  不再同请求内换号；文案改成「换号」+「重登/工单解不开」的实话；选路处接入
+  channelRestricted()，暂停期内一个上游请求都不发；成功一次即清暂停。
+  顺带修一处既有缺陷：流内 11140 路径原来先 humanize 再 applyCool，导致
+  account.lastError 记的是上游原始报文而不是真话，现改为先洗再落。
+- pool.cjs：新增 noteAccountRestricted()/channelRestricted()/clearRestrictedWave()
+  —— 「一波」计数（默认 15 分钟窗口内 2 个号）触发整池暂停（默认 30 分钟）。
+- config.cjs：新增 4 个旋钮 wbRestrictedRotateMax / wbRestrictedWave{WindowMs,Min} /
+  wbRestrictedHoldMs，默认值与社区现行实现对齐，holdMs=0 可关。
+- adapters.cjs / rules.cjs：版本三件套对齐官方更新接口实测值，补 5.9.x 新增头族
+  X-Client-Version / -Platform / -Product / X-Product-Version / X-Agent-Runtime。
+- 自测：新增 proxy-wb-restricted（7 项）；proxy-wb-blocked T7 改写为新语义
+  （被拦不换号 + 下一次请求自然落到好号）；四处写死版本号的断言改为校验内部自洽
+  —— 写死会让「上游换版本」变成「自测变红」，逼人改测试而不是改配置，
+  这正是 5.5.4 拖了几个月的机制性原因。
+- 文档：FORK.md 第九节补 11140 全节（语义/红线/旋钮/落点/版本自检方法），
+  AGENTS.md 风控表补两行。
+
+回归：网关 21 套自测全绿（各自独立沙箱）· npm run build 通过 · verify:memory 26/0 ·
+闭包 148 文件完整。

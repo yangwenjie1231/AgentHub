@@ -1287,8 +1287,17 @@ function makeWorkBuddy(channelId) {
         "x-private-data": "true",
         "x-ide-name": ideName,
         "x-ide-type": ideName,
-        "x-ide-version": c.clientVersion || "5.8.4",
+        "x-ide-version": c.clientVersion || "5.9.4",
         "x-product": c.productCode || "SaaS",
+        // 5.9.x 官方客户端新增的客户端身份头族（官方 CLI 2.182.0 包内头常量表实证：
+        // X-Client-Version / X-Client-Platform / X-Client-Product / X-Product-Version /
+        // X-Agent-Runtime）。5.8.x 时代网关完全没发这几个头，缺了就是「像 5.8.x 的旧客户端」。
+        // 取值与 x-ide-version / x-product 同源，避免版本号自相矛盾。
+        "x-client-version": c.clientVersion || "5.9.4",
+        "x-client-platform": "win32",
+        "x-client-product": "workbuddy",
+        "x-product-version": c.clientVersion || "5.9.4",
+        "x-agent-runtime": "local-agent",
         // OpenAI SDK 的标准头族：官方桌面端每条请求都带（抓包实证），Buddy2api 也带。
         // 缺这一族会被判「不像官方客户端」——它标记的是「请求由 Node 的官方 OpenAI SDK 发出」。
         "x-stainless-arch": "x64",
@@ -1639,9 +1648,15 @@ function makeWorkBuddy(channelId) {
 
     /** 渠道私有业务码分类（扩展点见本文件尾契约）：11140 = 账号在模型调用面上被风控拦截。
      *  单独成一档是为了两件事：① 立即冷却该账号（通用层会把它当 5xx，连错 3 次才熔断，
-     *  期间每次请求都白撞一趟）；② 让调用方能把上游那句「内容未通过安全审核」改写成本机能
-     *  执行的说法（见 server.cjs 的 ACCOUNT_BLOCKED_MSG）。不进渠道降级——这是账号状态，
-     *  不是渠道故障，罚渠道会误伤同渠道的其它好号 */
+     *  期间每次请求都白撞一趟）；② 让调用方能把上游那句误导性的 displayMsg（旧文案是
+     *  「内容未通过安全审核」，2026-10 起国际版是「账号存在异常行为，已被限制使用」）改写成本机能
+     *  执行的说法（见 server.cjs 的 accountBlockedMessage）。不进渠道降级——这是账号状态，
+     *  不是渠道故障，罚渠道会误伤同渠道的其它好号。
+     *
+     *  switchable 仍留 true，但**是否真的换号由 server 的策略裁决**（accountBlockedStop）：
+     *  默认 wbRestrictedRotateMax=0 → 第一个号被拦就停手，因为「被拦后立刻换号继续打」会
+     *  加重同设备连坐（社区实测：一个任务里连封 7 个号）。这里不写死 false 是为了让
+     *  用户把该旋钮调大时能恢复旧行为，也让别的调用方（如探活）继续复用同一分类 */
     classifyError(e) {
       if (isWbAccountBlocked(e)) return { kind: "account_blocked", switchable: true, status: 403 };
       return null;

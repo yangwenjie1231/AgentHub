@@ -99,17 +99,20 @@ node tools/gateway-closure-check.cjs   # 网关闭包断言（防 Dockerfile COP
 | --- | --- | --- | --- |
 | **#156** | WorkBuddy CN 请求被拦截（11128） | 词级**零宽空格脱敏**（`DoS` → `Do‍S`），与客户端模板无关 | `proxy/desensitize.cjs` |
 | **#157** | 额度耗尽后免费模型也用不了 | 402 按「模型是否确认收费」分流 + `proxy.creditFloor` 积分保底 | `proxy/pool.cjs`、`proxy/server.cjs` |
+| **11140** | 国际版账号级风控（403 request illegal） | **看到即停手**（不换号连坐）+ 同渠道连坐暂停 + 如实文案（重登/工单解不开） | `proxy/server.cjs`、`proxy/pool.cjs`；旋钮 `proxy.wbRestricted*` |
+| **版本轮换** | 客户端版本过期 → 渠道校验拦 | 版本三件套对齐官方更新接口 + 5.9.x 新增 `X-Client-*` 头族；**版本号不进自测断言** | `proxy/rules.cjs`、`proxy/adapters.cjs`、`proxy/clientVersion.cjs` |
 
 对策来源（均为 2026-10 仍在活跃维护的项目，**不是**过时配方）：
 [hawklithm/workbuddy2api](https://github.com/hawklithm/workbuddy2api)（`desensitize.py`）、
-[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（`credit_floor`）。
+[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（`credit_floor`）、
+[ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)（11140 处置红线：`restrictedUntil` + 整池连坐暂停）。
 
 细节、边界与维护纪律见 [FORK.md](./FORK.md) 第九节。
 
 ## 提交前自查
 
 - [ ] `npm run build` 通过（含 `vue-tsc --noEmit`）
-- [ ] 网关 14 套自测全绿（各自独立沙箱）
+- [ ] 网关自测全绿（各自独立沙箱；清单见 FORK.md 第十一节）
 - [ ] `npm run verify:memory` 通过
 - [ ] `node tools/gateway-closure-check.cjs` 闭包完整
 - [ ] 没碰 `LICENSE` 与源文件版权头

@@ -136,7 +136,7 @@ function resolveChannel(key, model, settings) {
  *  熔断让位备选，到期半开自动恢复资格（成功一次清零，见 noteChannelSuccess）。
  *  关闭的渠道同样记 0 分（上游启闭：打分排不上去，路由不落） */
 function channelScore(channel) {
-  if (channelCooling(channel) || !adapters.channelOn(channel)) return 0;
+  if (channelCooling(channel) || pool.channelRestricted(channel) || !adapters.channelOn(channel)) return 0;
   const s = pool.poolSummary(channel);
   return (s.onlineCount > 0 ? 1 : 0) * (1 + s.totalCredits);
 }
@@ -159,7 +159,7 @@ function tierGroups() {
  *  totalCredits 不含 -1 哨兵，现状按 1+0 计分会把全无限账号的渠道垫到最底 */
 function costFirstScore(channel) {
   const s = pool.poolSummary(channel);
-  if (channelCooling(channel) || !adapters.channelOn(channel)) return 0;
+  if (channelCooling(channel) || pool.channelRestricted(channel) || !adapters.channelOn(channel)) return 0;
   const base = (s.onlineCount > 0 ? 1 : 0) * (1 + s.totalCredits);
   return s.unlimited ? base + 1e12 : base;
 }
@@ -170,7 +170,7 @@ function costFirstScore(channel) {
  *  settings 可选：/v1/models 过滤等调用方持有当前请求的 settings 对象，传入避免 channelOn
  *  回落到默认配置、漏判「上游启闭」刚做出的关闭（issue #90 自测抓到的口径偏差） */
 function routeUsable(channel, settings) {
-  if (channelCooling(channel) || !adapters.channelOn(channel, settings)) return false;
+  if (channelCooling(channel) || pool.channelRestricted(channel) || !adapters.channelOn(channel, settings)) return false;
   const now = Date.now();
   return pool.poolAccounts(channel).some((a) =>
     a.status === "online" && a.hasToken &&
@@ -402,12 +402,13 @@ function modelConfirmedPaidLazy(channel, model) {
  *  渠道私有业务码走扩展点 classifyError（契约见 adapters.cjs）：入参 channel 优先问适配器，
  *  返回非空即走渠道级分类。通用层保留的 4008/6004/11102/11115/11101 等码是**跨渠道共用**的
  * （trae/workbuddy/qoder 都会回同一族码），不能搬进单个渠道——搬走即改变其它渠道的分类结果 */
-function classifyUpstream(e, planLimit, channel, model) {
+function classifyUpstream(e, planLimit, channel, model, settings) {
   if (channel) {
     const ad = adapters.get(channel);
     if (ad && typeof ad.classifyError === "function") {
       const r = ad.classifyError(e);
-      if (r) return r;
+      // 渠道级分类结果补上「是哪个渠道 / 当前 settings」：applyCool 的 11140 分支要用它记连坐波次
+      if (r) return { ...r, channel, settings };
     }
   }
   if (planLimit || (e && e.status === 402)) {
@@ -486,16 +487,60 @@ function classifyUpstream(e, planLimit, channel, model) {
 }
 
 /** 账号级风控拦截（WB 403 code 11140）回给调用方的本地说法。
- *  上游把它的 displayMsg 写成「内容未通过安全审核，请调整后重试」，实测与提问内容、请求头、
- *  UA、x-domain 全无关（同 body 换号即 200，同号换任何 body 仍 403，同号目录/计费端点 200）——
- *  原样透传只会把用户推去改提问，而改提问永远不会好。改写成本机能执行的两条路：
- *  换号，或在客户端重新登录该账号换一个会话。上游 code/request_id 仍留在记账里（走 e.body） */
-const ACCOUNT_BLOCKED_MSG =
-  "账号被上游风控拦截（403 request illegal / code 11140）：该账号的模型调用已被上游整体拒绝，" +
-  "与提问内容无关（改提问无效）。请改用其它账号，或在客户端重新登录该账号以更换会话";
-function humanizeAccountBlocked(e, cls) {
-  if (e && cls && cls.kind === "account_blocked") e.message = ACCOUNT_BLOCKED_MSG;
+ *  上游的 displayMsg 曾是「内容未通过安全审核，请调整后重试」，2026-10 起国际版改为
+ *  「账号存在异常行为，已被限制使用」。实测与提问内容、请求头、UA、x-domain 全无关
+ *  （同 body 换号即 200，同号换任何 body 仍 403，同号目录/计费端点 200）——
+ *  原样透传只会把用户推去改提问，而改提问永远不会好。文案由下面 accountBlockedMessage 生成。 */
+function humanizeAccountBlocked(e, cls, hold) {
+  if (e && cls && cls.kind === "account_blocked") e.message = accountBlockedMessage(cls.settings, hold);
   return e;
+}
+
+/** 11140 的处置策略：**默认不换号**（2026-10 社区实测的处置红线，见 pool.cjs 顶部注释）。
+ *
+ *  旧行为是 `switchable: true` —— 被拦一个号就换下一个号继续同一份 body。社区多份实测表明这正是
+ *  加重连坐的动作：同一设备/出口在短时间内连续打到多个号的 11140，会把整池拖下水
+ *  （workbuddy2api-hub #422 用户实测：一个任务里 7 个号全被封；#629「国际版全体阵亡」）。
+ *  而且 11140 与请求内容、头、版本号都无关（换 body 仍拦 / 换号立刻 200 / 目录与计费端点照常 200），
+ *  换号「看起来能用」只是恰好落在没被限制的号上，并不是修好了什么。
+ *
+ *  新策略：**第一个号被拦就停手**，把真话交给客户端；下一次请求自然落到别的账号
+ *  （号池这时已经把该号冷却掉，pickAccount 不会再选它）。需要旧行为时把
+ *  `proxy.wbRestrictedRotateMax` 调大（默认 0 = 停手）。
+ *
+ *  另外，「重新登录」这条建议也是错的：社区实测重登 / 申诉工单 / 注销重注册都解不开
+ *  （workbuddy2api-hub #659），只有上游限制窗口自然到期。文案不得再引导用户去重登。 */
+function wbRestrictedRotateMax(settings) {
+  const v = Number(settings && settings.wbRestrictedRotateMax);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, 10) : 0;
+}
+
+/** 本次请求是否要因 11140 停手。返回 { stop: boolean, hold?: {until,count} } —— hold 非空表示
+ *  这一下刚好把该渠道推过了连坐阈值（整池已暂停），文案要带上。
+ *  「已换号次数」记在请求级 Map 上（键固定 "n"：跨渠道/跨账号共用一个计数）。
+ *  wbRestrictedRotateMax = 0（默认）时，第一次拿到 11140 就 stop。 */
+function accountBlockedStop(cls, settings, rotations, hold) {
+  if (!cls || cls.kind !== "account_blocked") return { stop: false };
+  const max = wbRestrictedRotateMax(settings);
+  const used = rotations.get("n") || 0;
+  if (used >= max) return { stop: true, hold: hold || null };
+  rotations.set("n", used + 1);
+  return { stop: false, hold: hold || null };
+}
+
+/** 账号级风控拦截回给调用方的本地说法（含本波暂停时的整池说明）。 */
+function accountBlockedMessage(settings, hold) {
+  // 措辞刻意避开「重新登录」这类动作指引：社区实测重登 / 申诉工单 / 注销重注册都解不开
+  // （workbuddy2api-hub #659），只有上游限制窗口自然到期。写成「重登也解不开」而不是
+  // 「请重新登录」——前者是事实，后者是把用户引向一条永远走不通的路。
+  const base =
+    "账号被上游风控拦截（403 request illegal / code 11140）：该账号的模型调用已被上游整体拒绝，" +
+    "与提问内容无关（改提问无效；重登、申诉工单同样解不开，只能等上游限制窗口自然到期）。" +
+    "已停止在该账号上重试，请改用其它账号";
+  if (!hold) return base;
+  const mins = Math.max(1, Math.round(((hold.until || Date.now()) - Date.now()) / 60000));
+  const n = Number(hold.count) || 1;
+  return base + `。本渠道 ${mins} 分钟内连续有 ${n} 个账号被拦，已整池暂停派发 ${mins} 分钟以避免设备连坐`;
 }
 
 /** WAF/渠道级故障识别：WAF Block Page（HTML）与渠道白名单 11128 都不是账号问题——
@@ -584,10 +629,12 @@ function channelCooling(channel) {
   return hit;
 }
 
-/** 请求在该渠道真实成功 → 渠道恢复完全体（streak 一并清零，下次降级从基础时长重新开始） */
+/** 请求在该渠道真实成功 → 渠道恢复完全体（streak 一并清零，下次降级从基础时长重新开始）；
+ *  风控连坐暂停同样清掉——能成功就说明上游那一波限制已经解除，没必要空等到期 */
 function noteChannelSuccess(channel) {
   if (!channel) return;
   channelFailStreaks.delete(channel);
+  pool.clearRestrictedWave(channel);
   if (channelHealth.has(channel)) {
     channelHealth.delete(channel);
     events.emit({ type: "channel-health", channel, state: "ok" });
@@ -660,6 +707,25 @@ function applyCool(accId, model, cls, message) {
       if (pool.noteSessionDead(accId)) pool.coolAccount(accId, "relogin", `${message || "凭证失效"}（连续 3 次，请重新登录）`);
       else pool.coolAccountMs(accId, Date.now() + 60000, `${message || "凭证失效"}（短冷却重试）`);
       return;
+    case "account_blocked": {
+      // 11140 账号级风控：冷却档位在 pool.coolAccount 里（2h），另外还要记「这一波」，
+      // 达到阈值就把整渠道暂停派发——连坐是靠「继续打」加重的，不是靠换号能绕开的。
+      // 返回这一波的状态给调用方，用于把「整池已暂停」写进回给用户的错误文案
+      pool.coolAccount(accId, "account_blocked", message);
+      const channel = (cls && cls.channel) || (store.getAccount(accId) || {}).channel || "";
+      const wave = pool.noteAccountRestricted(channel, cls && cls.settings);
+      if (wave.hold) {
+        oplog.log(
+          "warn",
+          "上游风控",
+          `渠道 ${channel || "?"} 在 ${Math.round(wave.windowMs / 60000)} 分钟内被 11140 拦下 ${wave.count} 个账号，` +
+            `已整池暂停派发 ${Math.round((wave.until - Date.now()) / 60000)} 分钟（避免设备连坐）`,
+          { channel }
+        );
+        events.emit({ type: "channel-health", channel, state: "restricted", until: wave.until });
+      }
+      return wave.hold ? { restrictedHold: pool.channelRestricted(channel) } : null;
+    }
     case "server": {
       // 5xx/网络：单次失败不冷却（只由外层轮转换号），连续 3 次才熔断（30m 指数封顶 6h）。
       // 语义（note_error 的 err_count 分支）：网络抖动/上游偶发 5xx 立即罚 10 分钟
@@ -980,6 +1046,9 @@ async function handleChat(req, res, settings, surface, convNotes) {
     // 误判「我已经停用了这个账号怎么还在用」——渠道名 ≠ 账号名（issue #74 的困惑来源）
     let failoverFrom = "";    // 成功渠道 ≠ 主渠道时记录 failover:主→实（记账轨迹）
     let planLimitEnd = false; // planLimit（402）流中已出线的就地收尾：不是真成功，不清渠道降级态
+    // 本次请求已因 11140 换过几次号（键固定 "n"：跨渠道/跨账号共用一个请求级计数）。
+    // 默认上限 0 → 第一次被拦就停手，不再换号（见 accountBlockedStop 注释）
+    const restrictedRotations = new Map();
     for (const chainModel of modelChain) {
       if (done || fatalErr) break;
       if (upstreamTries >= maxTries) break; // 上游尝试预算用尽：不再开新渠道/新模型
@@ -1031,6 +1100,20 @@ async function handleChat(req, res, settings, surface, convNotes) {
           // 渠道级降级：根本没进号池，无账号可记。note 区分「降级中」与「号池空」——
           // 两者都不带账号名，但原因不同：把熔断报成「无可用账号」是同类歧义（issue #74）
           triedChannels.push({ chan, accounts: [], note: "渠道降级中" });
+          continue;
+        }
+        // 风控连坐暂停（11140 一波）：与降级同性质但原因不同，期间一个上游请求都不发。
+        // 不罚号、不计渠道失败（这是上游的账号级限制，罚渠道会把「限制窗口到期就恢复」的
+        // 半开语义搞乱），只如实告诉调用方还要等多久
+        const chHold = pool.channelRestricted(chan);
+        if (chHold) {
+          if (!lastErr) {
+            lastErr = Object.assign(
+              new Error(`渠道 ${chan} 因上游风控连坐暂停派发中（${Math.ceil((chHold.until - Date.now()) / 60000)} 分钟后自动恢复；期间不向上游发任何请求）`),
+              { status: 429 }
+            );
+          }
+          triedChannels.push({ chan, accounts: [], note: "风控连坐暂停" });
           continue;
         }
         // 单渠道在途已满：跳过先试备选（选路过滤，routing::at_concurrency_limit 的语义）。
@@ -1199,10 +1282,15 @@ async function handleChat(req, res, settings, surface, convNotes) {
               // 与 catch 路径（下方 classifyUpstream 后的 switchable 检查）同口径：
               // 确定性拒绝（prompt_too_long / fatal / model_denied）换号必白撞，
               // 流中路径也必须终止，否则客户端参数错误会逐个冷却全池账号
-              const cls = classifyUpstream(lastErr, false, chan, targetModel);
-              humanizeAccountBlocked(lastErr, cls);
-              applyCool(acc.id, targetModel, cls, lastErr.message);
-              if (!cls.switchable) {
+              const cls = classifyUpstream(lastErr, false, chan, targetModel, settings);
+              // 先落冷却再判停手：冷却理由要是给人看的真话（上游原始 403 报文进 account.lastError
+              // 会挂一个既不是「风控」也不是「11140」的长串，用户看不出这是账号级限制）
+              humanizeAccountBlocked(lastErr, cls, null);
+              const coolInfo = applyCool(acc.id, targetModel, cls, lastErr.message);
+              // 11140 账号级风控：默认停手（换号会加重设备连坐），见 accountBlockedStop 注释
+              const blockedHold = accountBlockedStop(cls, settings, restrictedRotations, coolInfo && coolInfo.restrictedHold);
+              humanizeAccountBlocked(lastErr, cls, blockedHold.hold);
+              if (blockedHold.stop || !cls.switchable) {
                 fatalErr = lastErr;
                 streamErr = null;
                 break;
@@ -1253,8 +1341,7 @@ async function handleChat(req, res, settings, surface, convNotes) {
               markAttempt("fatal");
               break;
             }
-            const cls = classifyUpstream(e, false, chan, targetModel);
-            humanizeAccountBlocked(e, cls);
+            const cls = classifyUpstream(e, false, chan, targetModel, settings);
             markAttempt(cls.kind);
             // 瞬时错误（5xx/网络/超时）同账号原地重发：先在这个账号上按配置次数重发吸收抖动，
             // 用尽才走换号。首字节超时（firstByteTimeout）虽是"慢"不是"账号故障"，
@@ -1315,8 +1402,12 @@ async function handleChat(req, res, settings, surface, convNotes) {
               await new Promise((r) => setTimeout(r, rateDelay));
               continue;
             }
-            applyCool(acc.id, targetModel, cls, e.message);
-            if (!cls.switchable) {
+            humanizeAccountBlocked(e, cls, null);
+            const coolInfo = applyCool(acc.id, targetModel, cls, e.message);
+            // 11140 账号级风控：默认停手（换号会加重设备连坐），见下方 accountBlockedStop 注释
+            const blockedHold = accountBlockedStop(cls, settings, restrictedRotations, coolInfo && coolInfo.restrictedHold);
+            humanizeAccountBlocked(e, cls, blockedHold.hold);
+            if (blockedHold.stop || !cls.switchable) {
               fatalErr = e;
               break;
             }
@@ -1338,7 +1429,7 @@ async function handleChat(req, res, settings, surface, convNotes) {
         if (!done && !fatalErr && !budgetOut) {
           triedChannels.push({ chan, accounts: triedAccountNames });
           if (!degradedHere && realTries > 0 && lastErr) {
-            const cls = classifyUpstream(lastErr, false, chan, targetModel);
+            const cls = classifyUpstream(lastErr, false, chan, targetModel, settings);
             if (DEGRADABLE.has(cls.kind) && noteChannelFail(chan) >= 2) {
               degradeChannel(chan, String(lastErr.message || cls.kind).slice(0, 120), settings);
             }
@@ -1699,3 +1790,4 @@ module.exports = { start, stop, stopAsync, drainAndStop, status, channelHealthSn
   nearModelIds,
   // 瞬时错误原地重发纯函数（自测断言用）
   retrySameAccountCount, retrySameAccountIntervalMs };
+

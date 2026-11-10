@@ -269,20 +269,22 @@ const DEFAULTS = {
       // chat 出站 Origin/Referer 基域（originRefererFor 实证 CN=codebuddy.cn）
       origin: "https://www.codebuddy.cn",
       // 官方桌面端指纹（逆向实证）：三段式 UA 与 IDE 归属头组，少一项都可能被风控判为网关
-      // 版本对齐 AutoBuddy CN 模块（2026-10-27 更新，实测 UI 用 5.5.6）：
-      //   旧值 5.5.4 落后两个小版本；上游按客户端身份做渠道校验（11128
+      // 版本对齐**官方更新接口实测**（2026-11-10：copilot.tencent.com/v2/update?
+      // platform=workbuddy-win32-x64-user → 5.9.3.42398134）：
+      //   旧值 5.5.6 落后三年小版本；上游按客户端身份做渠道校验（11128
       //   "Illegal API invocation from an unapproved channel"），版本过旧会被判非官方客户端。
-      clientVersion: "5.5.6",
-      cliVersion: "2.137.1",
-      userAgent: "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
-      billingUA: "WorkBuddy/5.5.6",
+      // CLI 段沿用官方 npm 包当前版本（@tencent-ai/codebuddy-code 2.182.0，2026-11-09）。
+      clientVersion: "5.9.3",
+      cliVersion: "2.182.0",
+      userAgent: "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.182.0",
+      billingUA: "WorkBuddy/5.9.3",
       ideName: "WorkBuddy",
       // 官方实发值（AutoBuddy CN 桌面端头组实证）
       productCode: "SaaS",
       modelsUrl: "https://copilot.tencent.com/console/enterprises/personal/models",
       // v3 客户端权威目录（主路，含倍率/能力/上下文元数据）：必须用三段式 CLI UA，否则 400 code 12403
       modelsV3Url: "https://copilot.tencent.com/v3/config",
-      catalogUA: "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
+      catalogUA: "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.182.0",
       // 登录/账号类插件端点的上游域（与计费域不同，必须单独给）
       pluginBase: "https://copilot.tencent.com",
       // 刷新渠道标识（两处口径不一致："plugin" 与 "workbuddy"，实测后固化）
@@ -297,22 +299,24 @@ const DEFAULTS = {
       billingBase: "https://www.workbuddy.ai",
       origin: "https://www.workbuddy.ai",
       // 版本三件套必须跟官方客户端同步更新——上游按它做渠道校验，过期即 400/11128。
-      // 取值来自 2026-10-23 官方桌面端真实抓包（getmessaagefromai/logs/requests-2026-10-23.jsonl）：
-      //   UA = WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0
-      //   x-ide-version = 5.8.4
-      // ⚠ 曾长期停在 5.5.4（2026-09-16 起未更新），与官方差三个小版本，
-      //   表现为「干净请求体也被 11128 拦」——内容层怎么改都救不了。
-      clientVersion: "5.8.4",
-      cliVersion: "2.161.0",
+      // 取值来自官方**更新接口实测**（2026-11-10，www.workbuddy.ai/v2/update?
+      // platform=workbuddy-win32-x64-user → 5.9.4.42593613；CN 域同日为 5.9.3.42398134）
+      // 与官方 CLI npm 包 @tencent-ai/codebuddy-code（2026-11-09 发 2.182.0，product.json
+      // 的 endpoint = https://www.codebuddy.ai，officialEndpoints 同时含 copilot.tencent.com）。
+      // ⚠ 曾长期停在 5.5.4（2026-09-16 起未更新）→ 5.8.4（2026-10-23 抓包），
+      //   与官方差版本时表现为「干净请求体也被 11128 拦」——内容层怎么改都救不了。
+      //   版本会持续轮换：升级时同步改这两处 + 跑 tools/proxy-client-version-selftest.cjs。
+      clientVersion: "5.9.4",
+      cliVersion: "2.182.0",
       // 平台段必须 WorkBuddy AI，送错触发 403 code 11140 request illegal
-      userAgent: "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0",
-      billingUA: "WorkBuddy/5.8.4",
+      userAgent: "WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.182.0",
+      billingUA: "WorkBuddy/5.9.4",
       ideName: "WorkBuddy",
       // 官方客户端实发值就是 "SaaS"（抓包证实），不是 ideName
       productCode: "SaaS",
       modelsUrl: "https://www.workbuddy.ai/console/enterprises/personal/models",
       modelsV3Url: "https://www.workbuddy.ai/v3/config",
-      catalogUA: "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0",
+      catalogUA: "WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.182.0",
       pluginBase: "https://www.workbuddy.ai",
       refreshSource: "plugin",
       deviceToken: "",

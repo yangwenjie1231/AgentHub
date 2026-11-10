@@ -475,20 +475,103 @@ Relative paths resolve from the workspace root; absolute paths identify files or
 `catalog.json` 的 `rate > 0`；`rate = 0`（免费）与无倍率（未知）一律放行——
 宁可撞一次 402 让模型级冷却兜住，也不要把未知模型一律判死。
 
+### 11140（账号级风控）——2026-11-10 更新：语义与处置策略都变了
+
+**先把两个码分清楚**，它们常被混为一谈：
+
+| 码 | 含义 | 与提问内容 | 换号有用吗 |
+| --- | --- | --- | --- |
+| `11128` | **内容审核/渠道资格**（指纹命中） | 有关 | 内容审核换号无用 |
+| `11140` | **账号级风控**（request illegal） | **完全无关** | 换号短期"能用"，但会**加重连坐** |
+
+11140 的判定事实（多方实测一致）：同 body 换账号立刻 200；同账号换任何 body 仍 403；
+同账号的 `/v3/config` 目录端点与计费端点照常 200 —— 是「模型调用」这一面上的账号状态。
+
+**displayMsg 已换文案**：旧的是「内容未通过安全审核，请调整后重试」（诱导用户去改提问，永无解），
+2026-10 起国际版是：
+
+```json
+{"code":11140,"msg":"request illegal",
+ "displayMsg":{"zh":"账号存在异常行为，已被限制使用",
+               "en":"Your account has been restricted due to unusual activity"}}
+```
+
+**重新登录 / 申诉工单 / 注销重注册都解不开**（[workbuddy2api-hub#659](https://github.com/ardeyouxipianyi/workbuddy2api-hub/issues/659)
+里提工单实测、注销重注册实测；[workbuddy2api-panel#197](https://github.com/linguo2625469/workbuddy2api-panel/issues/197)
+同样结论：「重登不会解决，除非客户端同时改了 body 形态」）。只有上游限制窗口自然到期。
+**任何文案都不许再引导用户去重登**——那是把用户引向一条走不通的路。
+
+**处置红线：看到 11140 立即停手，不要换号继续打。** 同一设备/出口在短时间内把多个号打到
+11140 会显著加重连坐（[#422](https://github.com/ardeyouxipianyi/workbuddy2api-hub/issues/422)
+用户实测：一个任务里 7 个号全被封；[#629](https://github.com/ardeyouxipianyi/workbuddy2api-hub/issues/629)
+「国际版全体阵亡」、[#641](https://github.com/ardeyouxipianyi/workbuddy2api-hub/issues/641)）。
+[workbuddy2api-hub 的 CHANGELOG v1.7.14](https://github.com/ardeyouxipianyi/workbuddy2api-hub/blob/main/docs/CHANGELOG.md)
+把这条写成了默认行为：不再跨号重试、限制期限持久化（`restrictedUntil`，2h）、
+整池连坐暂停（窗口 900s 内 2 个号被限 → 整区暂停派发 1800s）。
+
+#### 本 fork 的落地（`proxy/wb*` 旋钮，默认值见 `config.cjs`）
+
+| 旋钮 | 默认 | 作用 |
+| --- | --- | --- |
+| `proxy.wbRestrictedRotateMax` | `0` | 单请求内因 11140 允许换号的次数。**0 = 停手**（新默认） |
+| `proxy.wbRestrictedWaveWindowMs` | `900000` | 「一波」时间窗（15 分钟） |
+| `proxy.wbRestrictedWaveMin` | `2` | 窗口内被拦账号数达此值 → 整池暂停 |
+| `proxy.wbRestrictedHoldMs` | `1800000` | 整池暂停时长（30 分钟）；`0` = 关闭暂停 |
+
+代码落点：
+
+- `pool.cjs`：`noteAccountRestricted()` / `channelRestricted()` / `clearRestrictedWave()`
+  —— 波次计数与整池暂停状态机（内存态；账号本身的 2h 冷却已由 `coolAccount` 落库）；
+- `server.cjs`：`accountBlockedStop()` 决定「这一下要不要停手」，`applyCool` 的
+  `account_blocked` 分支记波次并触发暂停；选路处 `channelRestricted()` 命中即跳过该渠道，
+  期间**一个上游请求都不发**；`noteChannelSuccess()` 成功一次即清暂停；
+- 文案 `accountBlockedMessage()`：点明 11140 + 说明重登/工单解不开 + 暂停时带上剩余分钟数。
+
+**行为变化（升级注意）**：旧版被拦后会**在同一个请求内换号继续试**，看起来「能用」；
+新版默认停手，客户端会收到一条明确的 403。这是刻意的——同请求内连打正是连坐的放大器。
+需要旧行为时把 `wbRestrictedRotateMax` 调大。
+
+自测：`tools/proxy-wb-restricted-selftest.cjs`（7 项：停手/配额/暂停/零请求/恢复/开关/文案）。
+
+### 版本三件套：别把版本号写进测试，也别靠人肉记
+
+官方更新接口（无需鉴权，`clientVersion.cjs` 已在用）：
+
+```bash
+curl 'https://www.workbuddy.ai/v2/update?platform=workbuddy-win32-x64-user&version=5.0.0'      # 国际版
+curl 'https://copilot.tencent.com/v2/update?platform=workbuddy-win32-x64-user&version=5.0.0'   # 国内版
+```
+
+2026-11-10 实测：国际版 `5.9.4.42593613`、国内版 `5.9.3.42398134`；官方 CLI 的 npm 包
+`@tencent-ai/codebuddy-code` 同日最新 `2.182.0`（`product.json` 里 `endpoint = www.codebuddy.ai`，
+`officialEndpoints` 同时含 `copilot.tencent.com`）。
+
+**教训**：仓库里曾把 `5.8.4 / 2.161.0` 写进**自测断言**，于是「上游换版本」变成「自测变红」，
+逼人改测试而不是改配置。现在自测只校验**内部自洽**（UA/catalogUA/billingUA 必须与
+`clientVersion`+`cliVersion` 同源），具体值由 `rules.DEFAULTS` 与
+`tools/proxy-client-version-selftest.cjs` 的在线自检负责盯。
+
+**5.9.x 新增的头族**（官方 CLI 2.182.0 包内头常量表实证）：
+`X-Client-Version` / `X-Client-Platform` / `X-Client-Product` / `X-Product-Version` /
+`X-Agent-Runtime`（值 `local-agent`）。旧的 `headers()` 只发 5.8.x 那一套，缺这几个就是
+「像 5.8.x 的旧客户端」。已补进 `adapters.cjs`。
+
 ### 被 11128 拦住时怎么定位（排障指引）
 
 先分清是**哪一条路径**——两者的 `msg` 不同，处理方式完全相反：
 
 | 上游 `msg` | 含义 | 正确处理 |
 | --- | --- | --- |
-| `request illegal` | **内容审核**（指纹/敏感词命中） | 走脱敏四层管线；与账号无关，**不要换号、不要罚号** |
 | `Illegal API invocation from an unapproved channel` | **渠道资格校验**（客户端指纹） | 属渠道级，换号照拦；如实报错 + 渠道短退避 |
+| `first message is not system prompt` / `conversation id missing` | **请求形状关** | 补 system 首条 / 补齐会话头三件套 |
+
+（`request illegal` 属 11140，见上一节——它**不是** 11128，别按内容审核处理。）
 
 AgentHub 侧 `server.cjs` 的 `isChannelBlock()` 按 `code === 11128` 判渠道级、
 `isClientGate()` 按正文文本判资格校验，两条都**不罚账号**（`applyCool` 无对应分支），
 这一点是对的——内容审核换号确实无效。
 
-定位是哪一条指纹，用 `listFingerprintHits`：
+定位是哪一条指纹（11128 内容审核路径），用 `listFingerprintHits`：
 
 ```bash
 node -e "
@@ -509,16 +592,27 @@ console.log('命中敏感词数:', d.countHits(s));
 
 1. **先看现行实现，别抄旧配方**。抄之前用 `git log -1 --format=%ci -- <path>` 确认
    那份代码最近还在改；超过半年没动、或在 legacy 目录里的，一律当**过时**处理。
-2. **词表/判据要能持续加**。脱敏词表与 `creditFloor` 都是数据驱动，补词比改逻辑安全。
-3. **每次改完必跑**：`tools/proxy-desensitize-selftest.cjs` +
-   `tools/proxy-credit-floor-selftest.cjs` + 既有 12 个网关自测（共 14 套，已接入 CI）。
+2. **词表/判据要能持续加**。脱敏词表、`creditFloor` 与 `wbRestricted*` 都是数据驱动，
+   补词/调旋钮比改逻辑安全。
+3. **每次改完必跑**：`tools/proxy-wb-restricted-selftest.cjs`（11140 处置策略，7 项）+
+   `tools/proxy-wb-blocked-selftest.cjs`（11140 识别与探活，9 项）+
+   `tools/proxy-desensitize-selftest.cjs` + `tools/proxy-credit-floor-selftest.cjs`
+   + 既有网关自测（已接入 CI）。
 4. **不要在分类层写死单个渠道的业务码**。`server.cjs` 的注释已说明：4008 / 6004 /
    11102 是 trae / workbuddy / qoder **共用**的一族码，搬进单个渠道的 `classifyError`
-   会改变其它渠道的分类结果。
+   会改变其它渠道的分类结果。11140 走的是渠道私有扩展点（WB 专有），
+   但**「要不要换号」的裁决在 server 层**（`accountBlockedStop`），不在分类层——
+   渠道分类只说「这是什么错」，跨渠道的处置策略要在能看见全局的地方做。
 5. **改 `CLIENT_FINGERPRINTS` 后必验顺序**。长指纹必须先落，否则短规则会把长规则的
    原文改花。自测第 11 组有条顺序回归用例，别删。
 6. **不要扩大清洗范围到 user**。#603 实测 user / tool 不拦，洗了纯属白改用户正文与代码，
    还会打乱前缀缓存。要扩范围先拿探针数据说话。
+7. **不要把版本号写进自测断言**。写死 → 上游换版本 = 自测变红 → 人被逼着改测试而不是
+   改配置，这正是 `5.5.4` 拖了几个月的机制性原因。自测只校验**内部自洽**，
+   版本真值交给 `clientVersion.cjs` 的在线自检（`proxy-client-version-selftest.cjs`）。
+8. **文案是这条线的一部分**。上游的 `displayMsg` 在误导（旧「内容未通过安全审核」、
+   11140 的「账号存在异常行为」），透传等于把用户送去改提问。每条错误文案都要能被用户
+   执行：要么告诉他换号，要么告诉他还剩多久，**不要**告诉他去做一件不管用的事（重登）。
 
 ---
 
@@ -526,7 +620,7 @@ console.log('命中敏感词数:', d.countHits(s));
 
 | 工作流 | 触发 | 作用 |
 | --- | --- | --- |
-| `.github/workflows/gateway-ci.yml` | push / PR 命中 `gateway/**`、`electron/backend/**`、`tools/proxy-*.cjs` 等路径 | 网关 Docker 形态：**14 套共享核心自测**（含脱敏与积分保底两套）+ 镜像构建 + 容器冒烟（fail-closed、API 契约、备份端点、优雅停机） |
+| `.github/workflows/gateway-ci.yml` | push / PR 命中 `gateway/**`、`electron/backend/**`、`tools/proxy-*.cjs` 等路径 | 网关 Docker 形态：**共享核心自测**（含脱敏、积分保底、11140 处置策略等）+ 镜像构建 + 容器冒烟（fail-closed、API 契约、备份端点、优雅停机） |
 | `.github/workflows/release.yml` | 手动 `workflow_dispatch` | 版本校验 → typecheck+构建 → 打包发 Release → 校验 latest.yml |
 
 上游没有「全量类型检查 + 记忆中枢自测」的常规 CI，只有发版流水线里带一道 `npm run build`。
@@ -553,14 +647,16 @@ jobs:
 
 ## 十一、本地自测怎么跑
 
-### 网关自测（13 个脚本，全部纯 Node）
+### 网关自测（全部纯 Node）
 
 ```bash
 # 逐个脚本跑，每个脚本给一个**全新**的沙箱目录
 for t in proxy-crypto-envelope proxy-adapter-contract proxy-key-lww proxy-failover \
          proxy-modelscope proxy-credits-expiry proxy-cost-route proxy-empty-pool-route \
          proxy-stats-rename proxy-channels proxy-agents-switch proxy-command-table \
-         proxy-desensitize proxy-credit-floor; do
+         proxy-desensitize proxy-credit-floor \
+         proxy-client-version proxy-rules-identity-sync \
+         proxy-wb-restricted proxy-wb-blocked proxy-wb-chat-e2e proxy-workbuddy-activity; do
   d=$(mktemp -d); s=$(mktemp -d)
   AGENTHUB_DATA_DIR="$d" AGENT_SKILLS_HOME="$s" node "tools/$t-selftest.cjs" || echo "FAILED: $t"
 done
@@ -571,11 +667,18 @@ done
 > 后一个脚本就会在「未标注渠道 costTier 为空串」这类断言上假失败。
 > 上游 `gateway-ci.yml` 的 `run_sbx()` 就是每个脚本 `mktemp -d` 一次——
 > 本地照抄这个约定，否则会得到一堆假红。
+>
+> ⚠️ `proxy-wb-chat-e2e` / `proxy-workbuddy-activity` 会往**家目录**写临时定位文件
+> （`.Dosage_sync.location`）。沙箱环境里需要把 `USERPROFILE` 指到可写目录，
+> 否则报 `EPERM ... .Dosage_sync.location`（与被测逻辑无关）。
+>
+> ⚠️ `rules.init()` 会起 chokidar watcher 盯 rules 目录，事件循环因此永不空转。
+> 相关自测结束时必须**显式 `process.exit()`**，否则脚本跑完不返回、CI 表现为「挂死」。
 
 另有依赖闭包断言（防止 Dockerfile 的 COPY 清单与真实闭包漂移）：
 
 ```bash
-node tools/gateway-closure-check.cjs      # 期望：闭包完整（145 个文件）
+node tools/gateway-closure-check.cjs      # 期望：闭包完整（当前 148 个文件）
 ```
 
 ### 其余自测

@@ -361,6 +361,55 @@ function coolAccountMs(id, untilMs, detail) {
   store.updateAccount(id, { status: "cooling", coolUntil: Math.max(Number(untilMs) || 0, Date.now() + 1000), coolReason: detail || "" });
 }
 
+// ===== 账号级风控（11140）的「整池连坐暂停」=====
+// 事实（2026-10 社区多份实测，见 FORK.md 第九节）：
+//   · 11140 是**账号级**风控状态，与提问内容 / 请求头 / 版本号都无关（换 body 仍拦、换号立刻 200）；
+//   · 它带**设备连带**性质：同一台机器在短时间内连续把多个号打到 11140，会显著加重连坐
+//     （workbuddy2api-hub #422 用户实测「一个任务里 7 个号全被封」——正是"被拦之后立刻换号继续打"）；
+//   · 重新登录 / 申诉工单 / 注销重注册**都解不开**（#659 实测），只有上游限制窗口自然到期。
+// 所以正确反应是**停手**：单个请求内不再换号试探（策略见 server.cjs 的 accountBlockedPolicy），
+// 且同一渠道在一个窗口内被拦的账号数达到阈值时，整渠道暂停派发一段时间——期间一个上游请求都不发。
+// 内存态：账号本身的冷却已随 coolAccountIn 落库（cool_until），重启后这些号照样选不中；
+// 这里记的只是「这一波」的聚合节奏，丢了最多让重启后多撞一次，不会把坏号误放回池。
+const RESTRICTED_WAVE_DEF = { windowMs: 15 * 60000, min: 2, holdMs: 30 * 60000 };
+const restrictedWaves = new Map(); // channel → { hits: number[], holdUntil: number, count: number }
+
+/** 记一次「账号被 11140 拦」并判定是否触发整池暂停。
+ *  settings 取 proxy 段：wbRestrictedWaveWindowMs / wbRestrictedWaveMin / wbRestrictedHoldMs。
+ *  返回 { hold, until, count, windowMs, min }：hold=true 表示该渠道现在应暂停派发 */
+function noteAccountRestricted(channel, settings) {
+  const s = settings || {};
+  const num = (v, def) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : def);
+  const windowMs = num(s.wbRestrictedWaveWindowMs, RESTRICTED_WAVE_DEF.windowMs) || RESTRICTED_WAVE_DEF.windowMs;
+  const min = Math.max(1, num(s.wbRestrictedWaveMin, RESTRICTED_WAVE_DEF.min) || RESTRICTED_WAVE_DEF.min);
+  // holdMs = 0 显式关闭暂停（与 creditFloor 同款「0 = 关闭」约定）
+  const holdMs = s.wbRestrictedHoldMs != null ? num(s.wbRestrictedHoldMs, RESTRICTED_WAVE_DEF.holdMs) : RESTRICTED_WAVE_DEF.holdMs;
+  const now = Date.now();
+  const cur = restrictedWaves.get(channel) || { hits: [], holdUntil: 0, count: 0 };
+  cur.hits = cur.hits.filter((t) => now - t < windowMs);
+  cur.hits.push(now);
+  cur.count = cur.hits.length;
+  let hold = false;
+  if (holdMs > 0 && cur.count >= min) {
+    cur.holdUntil = Math.max(cur.holdUntil || 0, now + holdMs);
+    hold = cur.holdUntil > now;
+  }
+  restrictedWaves.set(channel, cur);
+  return { hold, until: cur.holdUntil || 0, count: cur.count, windowMs, min };
+}
+
+/** 该渠道是否处于「风控连坐暂停」中：返回 { until, count } 或 null（到期即失效，不删条目） */
+function channelRestricted(channel) {
+  const cur = restrictedWaves.get(channel);
+  if (!cur || !cur.holdUntil || cur.holdUntil <= Date.now()) return null;
+  return { until: cur.holdUntil, count: cur.count || 0 };
+}
+
+/** 账号真的成功一次 → 说明上游已解除该渠道的限制，本波计数与暂停一并清掉 */
+function clearRestrictedWave(channel) {
+  restrictedWaves.delete(channel);
+}
+
 // ===== 并发租约 / 防惊群 / 软限流指数 / 会话判定计数（内存态） =====
 
 const inFlight = new Map(); // accId → 在途请求数
@@ -484,4 +533,6 @@ module.exports = {
   acquireAccount, releaseAccount, inFlightCount, softBackoffMs, noteSessionDead, noteServerError, noteSuccess,
   releaseCool, zeroBalanceUsable,
   setCreditFloor, getCreditFloor, modelRateOf, modelConfirmedPaid, isCreditExhausted,
+  // 账号级风控（11140）连坐暂停：记波次 / 查暂停 / 成功后清
+  noteAccountRestricted, channelRestricted, clearRestrictedWave, RESTRICTED_WAVE_DEF,
 };

@@ -184,6 +184,9 @@ async function main() {
     port: 19534, bind: "127.0.0.1", rateLimitPerMin: 120, concurrency: 8,
     routeStrategy: "smart", fixedChannel: "workbuddy_ai", modelOverrides: {}, debugStatus: false,
     humanizeJitter: false, disabledModels: [], channelFailover: false,
+    // 停手策略与连坐暂停：本自测的假上游只有一个被拦号，把阈值调到 2 以免单号就触发整池暂停
+    // （整池暂停的专门用例在 tools/proxy-wb-restricted-selftest.cjs）
+    wbRestrictedRotateMax: 0, wbRestrictedWaveWindowMs: 900000, wbRestrictedWaveMin: 2, wbRestrictedHoldMs: 1800000,
   };
   const sr = await server.start(() => cfg);
   assert(sr.ok, "网关启动: " + (sr.message || ""));
@@ -196,21 +199,30 @@ async function main() {
       body: JSON.stringify({ model: "glm-5.3", stream: false, messages: [{ role: "user", content: "hi" }] }),
     });
 
-  await T("T7 池内换号：被拦号打头 → 请求内换到好号成功，被拦号落 2h 冷却且理由是真话", async () => {
+  await T("T7 被拦即停手（新策略）：被拦号打头 → 不再换号，直接如实报错 + 该号落 2h 冷却", async () => {
+    // ⚠ 行为在 2026-11 变了：旧实现被拦后立刻换下一个号（switchable=true 一路换到池底），
+    //   社区实测那正是加重设备连坐的动作（一个任务里连封 7 个号）。现在默认 wbRestrictedRotateMax=0
+    //   → 第一个号被拦就停手，好号一次都不该被打。要旧行为请把该旋钮调大（见 proxy-wb-restricted 自测）。
     hits.blocked = 0; // T4 的探活也打过假上游，这里从零开始数
     hits.good = 0;
     const r = await call();
-    assert(r.status === 200, "请求应成功: " + r.status);
-    const j = await r.json();
-    assert(j.choices && j.choices[0].message.content.includes("pong"), "内容应来自好号: " + JSON.stringify(j).slice(0, 120));
-    assert(hits.blocked === 1 && hits.good === 1, "上游各打一次（被拦一次 + 好号一次）: " + JSON.stringify(hits));
-    const row = store.recentRequests(1)[0];
-    assert(row.accountId === goodId, "记账应归因好号: " + row.accountId);
+    assert(r.status !== 200, "被拦时必须失败（不再偷偷换号）: " + r.status);
+    assert(hits.blocked === 1 && hits.good === 0, "只打被拦号一次，好号零打扰: " + JSON.stringify(hits));
+    const txt = JSON.stringify(await r.json());
+    assert(/风控/.test(txt) && /11140/.test(txt), "错误要点明风控与 11140: " + txt.slice(0, 200));
     const acc = store.listAccounts("workbuddy_ai").find((a) => a.id === blockedId);
     assert(acc.status === "cooling", "被拦号必须立刻冷却（不再每请求白撞）: " + acc.status);
     assert(/风控/.test(acc.coolReason) && /11140/.test(acc.coolReason), "冷却理由必须是真话: " + acc.coolReason);
     const left = acc.coolUntil - Date.now();
     assert(left > 90 * 60000 && left <= 2 * 3600000, "冷却时长应约 2h（不是默认 60s）: " + Math.round(left / 60000) + "min");
+    // 被拦号已冷却 → 下一次请求自然落到好号（这才是正确的「换号」时机：跨请求，不是同请求内连打）
+    hits.blocked = 0;
+    hits.good = 0;
+    const r2 = await call();
+    assert(r2.status === 200, "下一次请求应落到好号: " + r2.status);
+    assert(hits.blocked === 0 && hits.good === 1, "被拦号不该再被打: " + JSON.stringify(hits));
+    const row = store.recentRequests(1)[0];
+    assert(row.accountId === goodId, "记账应归因好号: " + row.accountId);
   });
 
   await T("T8 全池被拦：回给调用方的错误点明风控，且不得出现上游那句内容审核文案", async () => {
@@ -245,6 +257,9 @@ async function main() {
     console.log(failures.join("\n"));
     process.exit(1);
   }
+  // rules.init() 的 chokidar watcher 会让事件循环永不空转（生产行为，不能为自测删掉）——
+  // 显式退出，否则脚本跑完不返回、CI 表现为「挂死」
+  process.exit(0);
 }
 
 main().catch((e) => {

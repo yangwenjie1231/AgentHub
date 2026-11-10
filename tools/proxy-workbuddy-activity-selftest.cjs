@@ -205,15 +205,25 @@ async function main() {
     );
 
     // ---- ⑥ 客户端标识必须对齐官方抓包真值 ----
-    // 真值来源：官方 WorkBuddy AI 桌面端抓包 2026-10-23（5.8.4 / CLI 2.161.0）。
+    // 真值来源：官方**更新接口实测**（2026-11-10：www.workbuddy.ai/v2/update → 5.9.4.42593613）
+    // 与官方 CLI npm 包（@tencent-ai/codebuddy-code 2.182.0）。
     // 版本三件套过期 → 上游渠道校验 400/11128，且**与请求体内容无关**
     // （实测：干净到只有 "You are a helpful assistant." + "hi" 的保活请求同样被拦），
-    // 内容层怎么改都救不了。故这里把每个字段钉住。
-    const EXPECT_UA = "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0";
-    assert(/clientVersion: "5\.8\.4"/.test(adSrc) || /clientVersion: "5\.8\.4"/.test(rulesSrcFor("workbuddy_ai")),
-      "clientVersion = 5.8.4（官方抓包真值）");
-    assert(/cliVersion: "2\.161\.0"/.test(rulesSrcFor("workbuddy_ai")), "cliVersion = 2.161.0");
-    assert(rulesSrcFor("workbuddy_ai").includes(`userAgent: "${EXPECT_UA}"`), "userAgent 三段式对齐官方（注意是小写 workbuddy-ai）");
+    // 内容层怎么改都救不了。
+    // ⚠ 这里**不写死具体版本号**：版本随上游轮换，写死会让「上游换版本」变成「自测变红」，
+    //   逼人改测试而不是改配置（本 fork 曾因此把 5.5.4 拖了几个月）。改为校验**内部自洽**：
+    //   UA / catalogUA / billingUA 三段必须与 clientVersion + cliVersion 同源，且形如官方，
+    //   具体值由 rules.DEFAULTS 与 clientVersion.cjs 的在线自检负责盯。
+    const wantAi = require("../electron/backend/proxy/rules.cjs").DEFAULTS["headers.json"].workbuddy_ai;
+    const VER_RE = /^\d+\.\d+\.\d+$/;
+    assert(VER_RE.test(wantAi.clientVersion), `AI clientVersion 形如 x.y.z（实际 ${wantAi.clientVersion}）`);
+    assert(/^\d+\.\d+\.\d+$/.test(wantAi.cliVersion), `AI cliVersion 形如 x.y.z（实际 ${wantAi.cliVersion}）`);
+    const EXPECT_UA = `WorkBuddy/${wantAi.clientVersion} workbuddy-ai/${wantAi.clientVersion} CLI/${wantAi.cliVersion}`;
+    assert(rulesSrcFor("workbuddy_ai").includes(`userAgent: "${EXPECT_UA}"`),
+      `userAgent 三段式与版本自洽（期望 ${EXPECT_UA}）`);
+    assert(rulesSrcFor("workbuddy_ai").includes(`catalogUA: "${EXPECT_UA}"`), "catalogUA 与 userAgent 同源");
+    assert(rulesSrcFor("workbuddy_ai").includes(`billingUA: "WorkBuddy/${wantAi.clientVersion}"`), "billingUA = WorkBuddy/clientVersion");
+    assert(rulesSrcFor("workbuddy_ai").includes(`cliVersion: "${wantAi.cliVersion}"`), "cliVersion 与内置默认一致");
     assert(rulesSrcFor("workbuddy_ai").includes(`productCode: "SaaS"`), "productCode = SaaS（官方实发值，不是 ideName）");
     // 出站头必须带 x-agent-intent / x-agent-type，且 x-product 不能是 ideName
     assert(/"x-agent-intent": "craft"/.test(adSrc), "出站带 x-agent-intent: craft");
@@ -306,11 +316,14 @@ async function main() {
       "checkinStatus 的 unavailable 判定也看 code"
     );
 
-    console.log("9. CN 渠道身份（2026-10-27 实测对齐）");
+    console.log("9. CN 渠道身份（内部自洽，具体版本由 rules.DEFAULTS 负责）");
     {
       const cnSrc = rulesSrcFor("workbuddy");
-      assert(/clientVersion: "5\.5\.6"/.test(cnSrc), "CN clientVersion = 5.5.6（旧值 5.5.4 落后两个小版本）", cnSrc.match(/clientVersion: "[^"]*"/)?.[0]);
-      assert(cnSrc.includes("WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"), "CN UA 三段式 5.5.6");
+      const wantCn = require("../electron/backend/proxy/rules.cjs").DEFAULTS["headers.json"].workbuddy;
+      const cnUA = `WorkBuddy/${wantCn.clientVersion} WorkBuddy/${wantCn.clientVersion} CLI/${wantCn.cliVersion}`;
+      assert(cnSrc.includes(`clientVersion: "${wantCn.clientVersion}"`), `CN clientVersion 与内置默认一致（${wantCn.clientVersion}）`, cnSrc.match(/clientVersion: "[^"]*"/)?.[0]);
+      assert(cnSrc.includes(cnUA), `CN UA 三段式自洽（期望 ${cnUA}）`);
+      assert(cnSrc.includes(`billingUA: "WorkBuddy/${wantCn.clientVersion}"`), "CN billingUA = WorkBuddy/clientVersion");
       assert(/productCode: "SaaS"/.test(cnSrc), "CN productCode = SaaS（官方实发值）");
       // X-Domain：无账号域时必须发端点域（官方 CN 桌面端恒发）
       assert(
