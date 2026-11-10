@@ -783,17 +783,32 @@ function accountView(r) {
   // 渠道一直显示报错、模型目录也不再刷新）。
   // 顺带清掉过期的"最近错误"：它属于那次冷却，冷却结束就不再是当前状态
   // （完整历史仍保留在 usage_requests，不会丢）。
+  // ⚠ restricted（11140 账号级限制）**不参与**这条派生复活：上游不给时间，本地不能猜。
+  //   它只能靠真实成功一次解除（pool.noteSuccess）。若把它也在这里复活，界面会显示「在线」
+  //   而实际每次请求都 403——那正是「看不出哪个号被封」的由来（workbuddy-manager #376 同款坑）。
+  // ⚠ 清 lastError 时必须**保住 raw 原文**：11140 的原始报文是申诉与排障的唯一凭据，
+  //   旧实现把整条 lastError 删掉，导致事后完全无法确认「到底是不是 11140」。
   let status = r.status;
   let coolUntil = r.cool_until;
   let coolReason = r.cool_reason || "";
   let lastError = meta.lastError || null;
+  // 派生复活会改写 meta（留档 raw / 删 lastError），返回视图必须用**改写后**的那份，
+  // 否则调用方拿到的是旧 meta（自测抓到的口径不一致：库里已是 archived，视图里还是旧错误）
+  let viewMeta = meta;
   if (status === "cooling" && coolUntil && coolUntil <= Date.now()) {
     status = "online";
     coolUntil = 0;
     coolReason = "";
-    lastError = null;
     const nextMeta = { ...meta };
-    delete nextMeta.lastError;
+    if (lastError && lastError.raw) {
+      // 冷却结束：界面气泡不该再挂旧错误，但原文留档（改标为 archived，前端不展示）
+      nextMeta.lastError = { at: lastError.at, message: "", raw: lastError.raw, archived: true };
+      lastError = null;
+    } else {
+      lastError = null;
+      delete nextMeta.lastError;
+    }
+    viewMeta = nextMeta;
     updateAccount(r.id, { status, coolUntil, coolReason, meta: nextMeta });
   }
   return {
@@ -826,7 +841,7 @@ function accountView(r) {
     hasToken: tokenUsable(r),
     domain: meta.domain || "",
     enterpriseId: meta.enterpriseId || "",
-    meta,
+    meta: viewMeta,
   };
 }
 
@@ -988,14 +1003,26 @@ function updateAccount(id, patch) {
 
 /** 记录账号最近一次上游错误（号池状态气泡展示用；只留最新一条，message 截 400 字）。
  *  渠道级拦截（11128/WAF）不冷却账号，这类错误只有落在这里才看得见。
- *  落库前过脱敏（redact.cjs）：上游报错回显的 Bearer/JWT 不进 meta 与日志页气泡 */
-function noteError(id, message) {
+ *  落库前过脱敏（redact.cjs）：上游报错回显的 Bearer/JWT 不进 meta 与日志页气泡。
+ *
+ *  opts.raw：**上游原始报文**（不截断、不进气泡、仅留档）。为什么单独留一份：
+ *  11128 与 11140 的 msg 都是 "request illegal"，唯一可靠的区分依据就在原文的 code /
+ *  displayMsg / retry_policy 里。旧实现只存一句中文转述，事后完全无法判断到底是哪个码
+ *  （实测吃过这个亏：一整批账号被拦，回头查库发现一条原文都没有）。
+ *  留档上限 4KB，防大响应体把 meta 撑爆；raw 带 archived 标记，冷却结束后仍保留。 */
+function noteError(id, message, opts) {
   const msg = redact(String(message || "").trim());
-  if (!id || !msg) return;
+  const raw = opts && opts.raw ? redact(String(opts.raw).slice(0, 4096)) : "";
+  if (!id) return;
+  if (!msg && !raw) return;
   open();
   const cur = getAccount(id);
   if (!cur) return;
-  const meta = { ...parseMeta(cur.meta), lastError: { at: Date.now(), message: msg.slice(0, 400) } };
+  const prev = parseMeta(cur.meta);
+  const entry = { at: Date.now(), message: msg.slice(0, 400) };
+  if (raw) entry.raw = raw;
+  else if (prev.lastError && prev.lastError.raw) entry.raw = prev.lastError.raw; // 保住已有原文
+  const meta = { ...prev, lastError: entry };
   updateAccount(id, { meta });
 }
 

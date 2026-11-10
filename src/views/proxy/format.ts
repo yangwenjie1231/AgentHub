@@ -211,6 +211,9 @@ export const ACCOUNT_STATUS: Record<string, { text: string; cls: string }> = {
   online: { text: "在线", cls: "tag-ok" },
   cooling: { text: "冷却中", cls: "tag-warn" },
   exhausted: { text: "已耗尽", cls: "tag-err" },
+  // 11140 账号级限制：上游不给恢复时间，本地不自动复活，只有真实成功一次才解除。
+  // 文案必须与 cooling 区分开——把它们混成一档正是「看不出哪个号被封」的由来
+  restricted: { text: "上游限制中", cls: "tag-err" },
   relogin: { text: "需重登", cls: "tag-err" },
   disabled: { text: "已停用", cls: "tag-dim" },
 };

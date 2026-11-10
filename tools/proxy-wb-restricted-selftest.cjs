@@ -139,12 +139,14 @@ async function main() {
     assert(!/内容未通过安全审核|safety review/.test(txt), "不得透传误导性的审核文案: " + txt.slice(0, 240));
   });
 
-  await T("T2 被拦号落 2h 冷却，理由是真话", () => {
+  await T("T2 被拦号落 restricted（不按计时复活），理由是真话", () => {
     const acc = store.listAccounts("workbuddy_ai").find((a) => a.id === b1);
-    assert(acc.status === "cooling", "应冷却: " + acc.status);
+    // 11140 用独立状态 restricted：不随 coolUntil 到期自动回 online（详见
+    // proxy-wb-restricted-state-selftest），coolUntil 只作界面展示参考
+    assert(acc.status === "restricted", "应为 restricted: " + acc.status);
     const left = acc.coolUntil - Date.now();
-    assert(left > 90 * 60000 && left <= 2 * 3600000 + 60000, "冷却应约 2h: " + Math.round(left / 60000) + "min");
-    assert(/风控/.test(acc.coolReason) && /11140/.test(acc.coolReason), "冷却理由必须是真话: " + acc.coolReason);
+    assert(left > 90 * 60000 && left <= 2 * 3600000 + 60000, "coolUntil 展示参考应约 2h: " + Math.round(left / 60000) + "min");
+    assert(/风控/.test(acc.coolReason) && /11140/.test(acc.coolReason), "限制理由必须是真话: " + acc.coolReason);
   });
 
   await T("T3 wbRestrictedRotateMax=1 时恢复旧行为：换一个号后才停手（上游被打 2 次）", async () => {

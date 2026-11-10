@@ -475,31 +475,45 @@ Relative paths resolve from the workspace root; absolute paths identify files or
 `catalog.json` 的 `rate > 0`；`rate = 0`（免费）与无倍率（未知）一律放行——
 宁可撞一次 402 让模型级冷却兜住，也不要把未知模型一律判死。
 
-### 11140（账号级风控）——2026-11-10 更新：语义与处置策略都变了
+### 11140（账号级风控）——2026-11-11 关键纠正：11128 与 11140 的 msg 一模一样
 
-**先把两个码分清楚**，它们常被混为一谈：
+**先把两个码分清楚**——它们的 `msg` **完全相同**，都是 `request illegal`，只能靠 `code`
+或 `displayMsg` 区分。这一条曾经导致本 fork 把**内容拦截误判成封号**：
+
+```json
+// 11128（内容/渠道拦截）：displayMsg 是「请求被拦截，请重新发送」
+{"code":11128,"msg":"request illegal","requestId":"…",
+ "displayMsg":{"en":"Request blocked. Please send it again","zh":"请求被拦截，请重新发送"}}
+
+// 11140（账号级限制）：displayMsg 是「账号存在异常行为，已被限制使用」
+{"code":11140,"msg":"request illegal",
+ "displayMsg":{"zh":"账号存在异常行为，已被限制使用","en":"Your account has been restricted due to unusual activity"},
+ "displayTips":{"zh":"系统检测到该账号存在异常使用行为，如需申诉请提交反馈"},
+ "retry_policy":{"retry":false},"actions":["EDIT_INPUT","SUBMIT_FEEDBACK"]}
+```
+
+**旧实现的判据是 `/request illegal/i` 兜底** → 所有 11128 都被判成 `account_blocked`，
+触发 2h 冷却 + 整渠道暂停，等于把「内容拦截」升级成「全渠道停发」。现在的判据只认：
+① `e.code === 11140`；② 正文含 `11140` 数字；③ displayMsg 的**独有文案**
+（`账号存在异常行为` / `restricted due to unusual activity`）。
+**「request illegal」单独出现一律不定性**，交给通用分类（11128 走 `isChannelBlock`/`isClientGate`）。
 
 | 码 | 含义 | 与提问内容 | 换号有用吗 |
 | --- | --- | --- | --- |
 | `11128` | **内容审核/渠道资格**（指纹命中） | 有关 | 内容审核换号无用 |
-| `11140` | **账号级风控**（request illegal） | **完全无关** | 换号短期"能用"，但会**加重连坐** |
+| `11140` | **账号级风控** | **完全无关** | 换号短期"能用"，但会**加重连坐** |
 
 11140 的判定事实（多方实测一致）：同 body 换账号立刻 200；同账号换任何 body 仍 403；
 同账号的 `/v3/config` 目录端点与计费端点照常 200 —— 是「模型调用」这一面上的账号状态。
 
-**displayMsg 已换文案**：旧的是「内容未通过安全审核，请调整后重试」（诱导用户去改提问，永无解），
-2026-10 起国际版是：
-
-```json
-{"code":11140,"msg":"request illegal",
- "displayMsg":{"zh":"账号存在异常行为，已被限制使用",
-               "en":"Your account has been restricted due to unusual activity"}}
-```
-
-**重新登录 / 申诉工单 / 注销重注册都解不开**（[workbuddy2api-hub#659](https://github.com/ardeyouxipianyi/workbuddy2api-hub/issues/659)
-里提工单实测、注销重注册实测；[workbuddy2api-panel#197](https://github.com/linguo2625469/workbuddy2api-panel/issues/197)
-同样结论：「重登不会解决，除非客户端同时改了 body 形态」）。只有上游限制窗口自然到期。
-**任何文案都不许再引导用户去重登**——那是把用户引向一条走不通的路。
+**「等它自己冷却」是错的**。官方报文自带 `retry_policy:{"retry":false}`，
+社区有人用**官方客户端**停用 12 小时仍未恢复
+（[腾讯云社区提问](https://developer.cloud.tencent.com/ask/2213521/answer/2954325)，App 5.9.3）。
+社区把「当成可自行恢复的软冷却」明确记为 bug
+（[workbuddy-manager #376](https://github.com/ithtelab/workbuddy-manager/issues/376)：
+「账号一直在冷却里循环、看不出哪个号被封」）。**重登 / 申诉工单 / 注销重注册也解不开**
+（[workbuddy2api-hub#659](https://github.com/ardeyouxipianyi/workbuddy2api-hub/issues/659)）。
+故任何文案都不许再引导重登或「等倒计时」。
 
 **处置红线：看到 11140 立即停手，不要换号继续打。** 同一设备/出口在短时间内把多个号打到
 11140 会显著加重连坐（[#422](https://github.com/ardeyouxipianyi/workbuddy2api-hub/issues/422)
@@ -509,13 +523,33 @@ Relative paths resolve from the workspace root; absolute paths identify files or
 把这条写成了默认行为：不再跨号重试、限制期限持久化（`restrictedUntil`，2h）、
 整池连坐暂停（窗口 900s 内 2 个号被限 → 整区暂停派发 1800s）。
 
-#### 本 fork 的落地（`proxy/wb*` 旋钮，默认值见 `config.cjs`）
+#### 状态机：`restricted` 是独立状态，不随计时复活
+
+这是与 `cooling` 的**本质区别**，也是对「等它冷却就好」这个误解的正面回答：
+
+| 状态 | 触发 | 如何解除 |
+| --- | --- | --- |
+| `cooling` | 429 / 5xx / 404 等 | **计时到期自动回 `online`** |
+| `restricted` | 11140 账号级限制 | **只有真实成功一次**（`noteSuccess`）或**手动解封** |
+
+`effectiveStatus()` 里 `restricted` 直接短路，不进"到期复活"分支；`pickAccount` 不会选中它；
+号池页显示「上游限制中」，且**不显示倒计时**（上游不给时间，显示数字等于骗人）。
+手动解封入口：号池页「解除限制」按钮（`pool.releaseCool` 同时接受 `cooling` 与 `restricted`）。
+
+#### 取证：11140 的原始报文必须留档
+
+`noteError(id, message, { raw })` 把上游原文（≤4KB）存进 `meta.lastError.raw`。
+必须这么做，因为 11128/11140 的 `msg` 相同，**中文转述无法证明到底是哪个码**
+（实测吃过亏：一整批账号被拦，回头查库发现一条原文都没有，无法判断是封号还是内容拦截）。
+冷却结束只把 `lastError` 标记 `archived` 并清空气泡，**raw 原文保留**。
+
+#### 连坐暂停（`proxy.wbRestricted*` 旋钮）
 
 | 旋钮 | 默认 | 作用 |
 | --- | --- | --- |
-| `proxy.wbRestrictedRotateMax` | `0` | 单请求内因 11140 允许换号的次数。**0 = 停手**（新默认） |
+| `proxy.wbRestrictedRotateMax` | `0` | 单请求内因 11140 允许换号的次数。**0 = 停手** |
 | `proxy.wbRestrictedWaveWindowMs` | `900000` | 「一波」时间窗（15 分钟） |
-| `proxy.wbRestrictedWaveMin` | `1` | 窗口内被拦账号数达此值 → 整池暂停。**1 = 拦下一个号就全渠道停发** |
+| `proxy.wbRestrictedWaveMin` | `1` | 窗口内被拦账号数达此值 → 整池暂停。**1 = 拦下一个就全渠道停发** |
 | `proxy.wbRestrictedHoldMs` | `1800000` | 整池暂停时长（30 分钟）；`0` = 关闭暂停 |
 
 **「停手」的边界（重要，别改错）**：停手只作用于**当前渠道**——跳出该渠道的账号循环，
@@ -537,7 +571,9 @@ Relative paths resolve from the workspace root; absolute paths identify files or
 需要旧行为时把 `wbRestrictedRotateMax` 调大。
 
 自测：`tools/proxy-wb-restricted-selftest.cjs`（9 项：停手 / 配额 / 一票暂停 / 零请求 /
-恢复 / 开关 / 文案 / 默认阈值=1 / 换渠道不被误伤）。
+恢复 / 开关 / 文案 / 默认阈值=1 / 换渠道不被误伤）+
+`tools/proxy-wb-restricted-state-selftest.cjs`（11 项：11128 与 11140 判别 / restricted
+不按计时复活 / 成功与手动解封 / 原始报文留档）。
 
 ### 版本三件套：别把版本号写进测试，也别靠人肉记
 
@@ -662,7 +698,8 @@ for t in proxy-crypto-envelope proxy-adapter-contract proxy-key-lww proxy-failov
          proxy-stats-rename proxy-channels proxy-agents-switch proxy-command-table \
          proxy-desensitize proxy-credit-floor \
          proxy-client-version proxy-rules-identity-sync \
-         proxy-wb-restricted proxy-wb-blocked proxy-wb-chat-e2e proxy-workbuddy-activity; do
+         proxy-wb-restricted proxy-wb-restricted-state proxy-wb-blocked \
+         proxy-wb-chat-e2e proxy-workbuddy-activity; do
   d=$(mktemp -d); s=$(mktemp -d)
   AGENTHUB_DATA_DIR="$d" AGENT_SKILLS_HOME="$s" node "tools/$t-selftest.cjs" || echo "FAILED: $t"
 done

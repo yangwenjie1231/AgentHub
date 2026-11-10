@@ -1132,17 +1132,30 @@ function uuidV4() {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
-/** WorkBuddy 账号级风控拦截识别：HTTP 403 + code 11140「request illegal」。
- *  上游把它的 displayMsg 伪装成内容审核（「内容未通过安全审核，请调整后重试」），实测与提问内容、
- *  请求头、UA、x-domain 全都无关：同一 body 换个账号立刻 200，同一账号换任何 body 仍 403；
- *  同账号的目录（/v3/config）与计费端点也照常 200——是账号在「模型调用」这一面上的风控状态，
- *  不是请求指纹问题，更不是提问内容问题。原样透传会把用户引到「改提问」这条死路上。
- *  双通道判定：HTTP 路径从 body 文本认码，流内 error 事件走 code 字段（与 11128 同口径）。 */
+/** WorkBuddy 账号级风控拦截识别：**必须靠 code 认，不能靠文案**。
+ *
+ *  ⚠ 这里踩过一个会导致「把内容拦截当成封号」的坑（2026-11-11 实测纠正）：
+ *  11128（内容/渠道拦截）与 11140（账号级限制）的 **msg 字段完全一样，都是 "request illegal"**：
+ *    11128: {"code":11128,"msg":"request illegal","displayMsg":{"zh":"请求被拦截，请重新发送"}}
+ *    11140: {"code":11140,"msg":"request illegal","displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}
+ *  旧实现的兜底判据是 /request illegal/i —— 于是**所有 11128 都被误判成账号被封**，
+ *  触发 2h 冷却 + 整池暂停，把内容拦截升级成了「全渠道停发」。这是最坏的一种误判：
+ *  内容问题换号/停池都没用，正确反应是脱敏后重发（11128 走 isChannelBlock/isClientGate）。
+ *
+ *  现在的判据（按可靠性排序）：
+ *    ① `e.code === 11140`（结构化字段，最可靠）；
+ *    ② 正文里出现 11140 这个数字；
+ *    ③ displayMsg 的**独有文案**（"账号存在异常行为"/"restricted due to unusual activity"）——
+ *       11128 不会出现这两句，故可作弱判据；但**绝不能用 "request illegal" 单独判定**。
+ *
+ *  双通道：HTTP 路径从 body 文本认，流内 error 事件走 code 字段（与 11128 同口径）。 */
 function isWbAccountBlocked(e) {
   if (!e) return false;
   if (Number(e.code) === 11140) return true;
   const s = String(e.body || e.message || "");
-  return /\b11140\b/.test(s) || /request illegal/i.test(s);
+  if (/\b11140\b/.test(s)) return true;
+  // 只认 11140 独有的 displayMsg；"request illegal" 是 11128/11140 共用的 msg，禁止作判据
+  return /账号存在异常行为|帳號存在異常行為|restricted due to unusual activity/i.test(s);
 }
 
 /** X-Device-Token 文件兜底（≤1KB、5min 缓存） */

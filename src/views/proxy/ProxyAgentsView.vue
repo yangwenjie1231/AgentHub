@@ -719,9 +719,11 @@ const solvingCaptchaId = ref<string>("");
 
 /** 最近错误是否仍然“有效”：账号在上次报错后有过成功调用（lastUsed 更新），
  *  说明那是一条历史错误，不应再标红/弹窗误导——6004 模型级冷却结束后最容易撞见
- *  “客户端已恢复、号池卡片还挂着旧 429”的观感。 */
+ *  “客户端已恢复、号池卡片还挂着旧 429”的观感。
+ *  archived（冷却结束后只留档的原文）不参与标红：它已经不对应当前状态了。 */
 function hasFreshError(acc?: ProxyAccount | null): boolean {
   if (!acc || !acc.lastError) return false;
+  if (acc.lastError.archived) return false;
   return !acc.lastUsed || acc.lastError.at >= acc.lastUsed;
 }
 
@@ -1447,7 +1449,9 @@ function fmtLeft(ms: number): string {
   const h = Math.floor(m / 60);
   return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
 }
-/** cooling 状态且未到期的剩余时长；其余状态返回空（不展示） */
+/** cooling 状态且未到期的剩余时长；其余状态返回空（不展示）
+ *  restricted（11140）**刻意不显示倒计时**：上游不给恢复时间，显示一个数字等于骗人，
+ *  会让人以为「等到点就好了」。它只显示「上游限制中」，出路是真实成功或手动解封。 */
 function coolLeft(acc: ProxyAccount): string {
   if (acc.status !== "cooling" || !acc.coolUntil) return "";
   return acc.coolUntil > now.value ? fmtLeft(acc.coolUntil - now.value) : "";
@@ -1900,10 +1904,12 @@ onUnmounted(() => {
                       </button>
                     </el-tooltip>
                     <el-tooltip
-                      v-if="acc.status === 'cooling' || (acc.modelCool && acc.modelCool.length)"
+                      v-if="acc.status === 'cooling' || acc.status === 'restricted' || (acc.modelCool && acc.modelCool.length)"
                       :content="acc.status === 'cooling'
                         ? '立即结束冷却，账号马上回到可用调度（同时豁免其模型级冷却）'
-                        : '该账号部分模型在冷却中（6004 限流/11102 不支持），解除后这些模型立即恢复可用'"
+                        : acc.status === 'restricted'
+                          ? '该账号被上游 11140 限制（上游不给恢复时间，不会自动解除）。若你已在官方客户端确认它恢复可用，点这里放回调度；否则继续等上游，或换用其它账号'
+                          : '该账号部分模型在冷却中（6004 限流/11102 不支持），解除后这些模型立即恢复可用'"
                       placement="top"
                     >
                       <button
@@ -1911,7 +1917,7 @@ onUnmounted(() => {
                         :disabled="coolOffId === acc.id"
                         @click="releaseCool(acc)"
                       >
-                        {{ coolOffId === acc.id ? "解除中…" : "解冷却" }}
+                        {{ coolOffId === acc.id ? "解除中…" : acc.status === "restricted" ? "解除限制" : "解冷却" }}
                       </button>
                     </el-tooltip>
                     <el-tooltip

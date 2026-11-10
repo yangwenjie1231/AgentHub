@@ -63,9 +63,15 @@ function decoratePackageStates(packages, now) {
 }
 
 /** 派生有效状态：cooling 到期自动回 online；exhausted 到次日 04:00 后给复活机会。
- *  只返回派生状态，不落库——落库时机由调用方 poolAccounts 统一收，避免双写 */
+ *  ⚠ **restricted 不在复活规则里，这是刻意的**：上游 11140 是账号级限制，
+ *  它不会因为本地计时到了就解除（实测停 12 小时仍未恢复；官方报错体自带
+ *  retry_policy:{retry:false}）。旧实现把它当 cooling 2h，到期后账号被自动放回池子、
+ *  请求照撞 403——看起来「冷却好了」，其实上游还在拦，界面也在撒谎。
+ *  解封只认一件事：**该账号真的成功一次**（见 noteSuccess → clearRestricted）。
+ *  只有返回派生状态，不落库——落库时机由调用方 poolAccounts 统一收，避免双写 */
 function effectiveStatus(acc, now) {
   now = now || Date.now();
+  if (acc.status === "restricted") return "restricted"; // 只能由真实成功解除
   if (acc.status === "cooling" && acc.cool_until && acc.cool_until <= now) return "online";
   if (acc.status === "exhausted" && acc.cool_until && acc.cool_until <= now) return "online";
   return acc.status;
@@ -345,11 +351,13 @@ function coolAccount(id, kind, detail) {
     case "relogin": // 401 刷新失败
       store.updateAccount(id, { status: "relogin", coolUntil: 0, coolReason: detail || "凭证失效，需重新登录" });
       break;
-    case "account_blocked": // 11140 账号级风控拦截（WB）：拦截时长上游不给，按小时级冷却
+    case "account_blocked": // 11140 账号级风控拦截（WB）：**不按时间复活**，只能靠真实成功解除
       // 档位不能取默认的 60s——风控状态不会自己好，1 分钟后被重新选中又是一次白撞；
-      // 也不能学 relogin 直接判死：实测该状态与账号本身无关（目录/计费端点照常 200），
-      // 换会话后可能就恢复了。2h 是「别把整池拖下水」与「别误判成永久失效」的折中
-      store.updateAccount(id, { status: "cooling", coolUntil: now + 2 * 3600000, coolReason: detail || "账号被上游风控拦截" });
+      // 也不学 relogin 直接判死：社区实测申诉也可能解不开，但确实有账号恢复的个例。
+      // 因此用独立状态 restricted：不进调度、不自动复活、界面如实显示「上游限制中」，
+      // 唯一出路是它真的成功一次（noteSuccess → online）。
+      // coolUntil 只作展示参考（2h），**不参与**复活判定（effectiveStatus 里 restricted 直接短路）
+      store.updateAccount(id, { status: "restricted", coolUntil: now + 2 * 3600000, coolReason: detail || "账号被上游风控拦截" });
       break;
     default:
       store.updateAccount(id, { status: "cooling", coolUntil: now + 60000, coolReason: detail || "" });
@@ -454,7 +462,9 @@ function noteServerError(id) {
   return Date.now() + Math.min(30 * 60000 * Math.pow(2, Math.min(n - 3, 3)), 6 * 3600000);
 }
 
-/** 成功收尾：清软限流 streak / 凭证失效计数 / 熔断计数 / 该账号该模型的负缓存（NoteSuccess 语义） */
+/** 成功收尾：清软限流 streak / 凭证失效计数 / 熔断计数 / 该账号该模型的负缓存（NoteSuccess 语义）。
+ *  同时是 **restricted（11140）唯一的解封通道**：能真实成功一次，才证明上游已经放行。
+ *  这里不做「到期自动复活」——上游不给时间，本地猜一个只会骗自己。 */
 function noteSuccess(id, model) {
   if (id == null) return;
   softStreaks.delete(id);
@@ -464,6 +474,13 @@ function noteSuccess(id, model) {
     modelCool.delete(modelCoolKey(id, model));
     store.deleteModelCooldowns(id, String(model).toLowerCase());
   }
+  // 11140 限制：只有真实成功才解除（并清掉当初的证据留痕）
+  try {
+    const acc = store.getAccount(id);
+    if (acc && acc.status === "restricted") {
+      store.updateAccount(id, { status: "online", coolUntil: 0, coolReason: "" });
+    }
+  } catch { /* 读库失败不影响成功路径 */ }
 }
 
 /** 手动解除冷却（号池页「解冷却」按钮）：账号级清状态立即回 online；
@@ -482,9 +499,12 @@ function releaseCool(id) {
     }
   }
   store.deleteModelCooldowns(id, null); // 库里的模型级负缓存一并清（重启后不复活）
-  if (acc.status === "cooling") {
+  if (acc.status === "cooling" || acc.status === "restricted") {
+    // restricted（11140）也给手动出口：上游到底有没有放行，用户比本地计时更可能知道
+    // （比如他刚在官方客户端试过能用）。放回 online 后若仍被拦，会再撞一次并被重新标记，
+    // 代价只有一次请求——但绝不替用户永久锁死。
     store.updateAccount(id, { status: "online", coolUntil: 0, coolReason: "" });
-    return { ok: true, releasedModels };
+    return { ok: true, releasedModels, wasRestricted: acc.status === "restricted" };
   }
   // 账号级不 cooling 但存在模型级负缓存（6004/11102 只罚"账号×模型"，不落账号状态）：
   // 同样允许解除，否则墙钟冷却期间用户没有手动出口（持久化后负缓存跨重启存活）

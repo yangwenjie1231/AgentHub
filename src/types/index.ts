@@ -374,7 +374,7 @@ export interface ProxyCheckinAutoRule {
 export type ProxyChannelId = "trae" | "workbuddy" | "workbuddy_ai" | "raccoon" | "modelscope" | "lobster" | "zcode" | "catpaw" | "qoder" | "qoder_intl" | "autoclaw" | "autoclaw_intl" | "cline_free" | "cline_pass" | "accio" | "accio_cn" | "codearts" | "loomy";
 /** Key 路由：auto 或任一渠道 id（渠道后续扩充即为普通字符串，保留字面量仅为补全提示） */
 export type ProxyRoute = "auto" | ProxyChannelId | (string & {});
-export type ProxyAccountStatus = "online" | "cooling" | "exhausted" | "relogin" | "disabled";
+export type ProxyAccountStatus = "online" | "cooling" | "exhausted" | "restricted" | "relogin" | "disabled";
 export type ProxyPoolStrategy = "expire_first" | "credit_first" | "round_robin";
 /** 渠道成本档（cost-first 路由排序用；'' = 未标注按 normal 解释） */
 export type ProxyCostTier = "free" | "low" | "normal";
@@ -472,7 +472,7 @@ export interface ProxyAccount {
   coolUntil: number;
   coolReason: string;
   /** 最近一次上游错误（号池状态气泡展示用；只留最新一条，无则为 null） */
-  lastError?: { at: number; message: string } | null;
+  lastError?: { at: number; message: string; raw?: string; archived?: boolean } | null;
   /** 今日签到结果（行内按钮三态与详情弹窗数据源；只留当天一条，跨天按 day 判为过期） */
   checkin?: ProxyCheckinRecord | null;
   /** 生效中的模型级负缓存（6004/11102 只罚"账号×模型"不落账号状态；空数组 = 无） */

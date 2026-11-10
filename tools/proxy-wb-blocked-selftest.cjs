@@ -211,10 +211,12 @@ async function main() {
     const txt = JSON.stringify(await r.json());
     assert(/风控/.test(txt) && /11140/.test(txt), "错误要点明风控与 11140: " + txt.slice(0, 200));
     const acc = store.listAccounts("workbuddy_ai").find((a) => a.id === blockedId);
-    assert(acc.status === "cooling", "被拦号必须立刻冷却（不再每请求白撞）: " + acc.status);
-    assert(/风控/.test(acc.coolReason) && /11140/.test(acc.coolReason), "冷却理由必须是真话: " + acc.coolReason);
+    // 11140 落**独立状态 restricted**（不是 cooling）：上游不给恢复时间，本地不按计时复活，
+    // 只有真实成功一次或手动解封才解除（详见 proxy-wb-restricted-state-selftest）
+    assert(acc.status === "restricted", "被拦号必须立刻离开调度（restricted）: " + acc.status);
+    assert(/风控/.test(acc.coolReason) && /11140/.test(acc.coolReason), "限制理由必须是真话: " + acc.coolReason);
     const left = acc.coolUntil - Date.now();
-    assert(left > 90 * 60000 && left <= 2 * 3600000, "冷却时长应约 2h（不是默认 60s）: " + Math.round(left / 60000) + "min");
+    assert(left > 90 * 60000 && left <= 2 * 3600000, "coolUntil 作展示参考应约 2h: " + Math.round(left / 60000) + "min");
     // 被拦号已冷却 → 下一次请求自然落到好号（这才是正确的「换号」时机：跨请求，不是同请求内连打）
     hits.blocked = 0;
     hits.good = 0;
@@ -236,7 +238,7 @@ async function main() {
     assert(!/内容未通过安全审核/.test(txt), "不得把上游那句误导性文案原样透传: " + txt.slice(0, 200));
     assert(!/safety review/.test(txt), "英文误导文案同样不得透传: " + txt.slice(0, 200));
     const acc = store.listAccounts("workbuddy_ai").find((a) => a.id === blockedId);
-    assert(acc.status === "cooling" && /风控/.test(acc.coolReason), "全池被拦时也要落冷却: " + acc.status);
+    assert(acc.status === "restricted" && /风控/.test(acc.coolReason), "全池被拦时也要落 restricted: " + acc.status);
   });
 
   // ===== ⑤ 切号预检 =====

@@ -653,7 +653,7 @@ function channelHealthSnapshot() {
 
 /** 按分类落冷却（账号级或账号×模型级）；429 优先对齐上游明示时间（墙钟/Retry-After），
  *  都没有时走有界指数退避；模型配置/参数/超长错误零动作不罚号 */
-function applyCool(accId, model, cls, message) {
+function applyCool(accId, model, cls, message, raw) {
   if (!accId) return;
   // 参数/模型配置类错误与账号无关，不罚号也不记错；其余落冷却的错误都记入账号最近错误（号池气泡展示）
   // slow（首字节超时）同样不记错：它是"这次请求太大/上游这一刻慢"，记在账号上只会留下误导性的
@@ -671,8 +671,12 @@ function applyCool(accId, model, cls, message) {
     // 再写账号 lastError 会让冷却/重置结束后卡片仍挂着旧 429，被读成「额度一直没恢复」
     cls.kind === "model_rate" ||
     (cls.kind === "model_denied" && !cls.channelLevel);
-  if (!silent && message) {
-    store.noteError(accId, message);
+  // 11140 必须**无条件**留档：它是唯一需要事后申诉/复核的错误，而中文转述无法证明「到底是
+  // 11140 还是 11128」（两者 msg 同为 request illegal）。故这一档不受 silent 影响
+  if (cls.kind === "account_blocked") {
+    store.noteError(accId, message, { raw: raw || message });
+  } else if (!silent && message) {
+    store.noteError(accId, message, raw ? { raw } : undefined);
   }
   switch (cls.kind) {
     case "model_config": // 4001 模型配置为空：模型问题不是账号问题，不罚号
@@ -1289,10 +1293,11 @@ async function handleChat(req, res, settings, surface, convNotes) {
               // 确定性拒绝（prompt_too_long / fatal / model_denied）换号必白撞，
               // 流中路径也必须终止，否则客户端参数错误会逐个冷却全池账号
               const cls = classifyUpstream(lastErr, false, chan, targetModel, settings);
-              // 先落冷却再判停手：冷却理由要是给人看的真话（上游原始 403 报文进 account.lastError
-              // 会挂一个既不是「风控」也不是「11140」的长串，用户看不出这是账号级限制）
+              // 上游原文要先留档再改写：lastErr.message 马上会被 humanize 成中文，
+              // 但 11140 的判定与申诉都需要 raw（11128 与 11140 的 msg 同为 request illegal）
+              const rawUpstream = String(lastErr.body || lastErr.message || "");
               humanizeAccountBlocked(lastErr, cls, null);
-              const coolInfo = applyCool(acc.id, targetModel, cls, lastErr.message);
+              const coolInfo = applyCool(acc.id, targetModel, cls, lastErr.message, rawUpstream);
               // 11140 账号级风控：默认停手（换号会加重设备连坐），见 accountBlockedStop 注释
               const blockedHold = accountBlockedStop(cls, settings, restrictedRotations, coolInfo && coolInfo.restrictedHold);
               humanizeAccountBlocked(lastErr, cls, blockedHold.hold);
@@ -1416,8 +1421,10 @@ async function handleChat(req, res, settings, surface, convNotes) {
               await new Promise((r) => setTimeout(r, rateDelay));
               continue;
             }
+            // 上游原文先留档（11128/11140 的 msg 同为 request illegal，只有 raw 能区分）
+            const rawUpstream = String(e && (e.body || e.message) ? (e.body || e.message) : "");
             humanizeAccountBlocked(e, cls, null);
-            const coolInfo = applyCool(acc.id, targetModel, cls, e.message);
+            const coolInfo = applyCool(acc.id, targetModel, cls, e.message, rawUpstream);
             // 11140 账号级风控：默认停手（换号会加重设备连坐），见下方 accountBlockedStop 注释
             const blockedHold = accountBlockedStop(cls, settings, restrictedRotations, coolInfo && coolInfo.restrictedHold);
             humanizeAccountBlocked(e, cls, blockedHold.hold);
