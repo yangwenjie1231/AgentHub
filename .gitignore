@@ -58,3 +58,6 @@ docs/
 # 反代网关 Docker 形态的运行时数据目录（与桌面版数据目录相互独立，不入库）
 gateway/data/
 gateway-data/
+
+# 提交信息临时文件（用 -F 传中文，见 AGENTS.md 第 6 条）
+.git-commit-msg.txt
