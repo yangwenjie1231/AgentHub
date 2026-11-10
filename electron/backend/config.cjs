@@ -268,7 +268,9 @@ function defaultConfig() {
                                 // 调大即恢复「换号继续试」的旧行为，代价是可能连坐更多账号
       wbRestrictedWaveWindowMs: 900000, // 「一波」的时间窗（毫秒，默认 15 分钟）：
                                         // 同一渠道在这个窗口内被拦的账号数达阈值即整池暂停
-      wbRestrictedWaveMin: 2,           // 触发整池暂停的账号数阈值（1~20；1 = 拦一个就暂停）
+      wbRestrictedWaveMin: 1,           // 触发整池暂停的账号数阈值（1~20）。
+                                        // **默认 1 = 拦下一个号就整渠道停发**：上游按设备/出口连带
+                                        // 判定，等到第 2 个号才停往往已经晚了（实测一个任务连封 7 个）
       wbRestrictedHoldMs: 1800000,      // 整池暂停时长（毫秒，默认 30 分钟；0 = 关闭暂停）
       checkinAutoRules: {},     // 按渠道自动签到：{ [渠道 id]: { enabled, time:"HH:mm", jitterMin } }，
                                 // 号池页各渠道工具栏各自设置（时间/抖动独立；默认全关）

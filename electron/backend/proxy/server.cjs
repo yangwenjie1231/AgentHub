@@ -1049,6 +1049,9 @@ async function handleChat(req, res, settings, surface, convNotes) {
     // 本次请求已因 11140 换过几次号（键固定 "n"：跨渠道/跨账号共用一个请求级计数）。
     // 默认上限 0 → 第一次被拦就停手，不再换号（见 accountBlockedStop 注释）
     const restrictedRotations = new Map();
+    // 本请求是否已有账号撞上 11140 并因此停止在该渠道换号。它**不是** fatal：
+    // 换渠道安全（不同渠道 = 不同上游域/账号体系），只跳出当前渠道继续走备选
+    let blockedHoldOut = false;
     for (const chainModel of modelChain) {
       if (done || fatalErr) break;
       if (upstreamTries >= maxTries) break; // 上游尝试预算用尽：不再开新渠道/新模型
@@ -1290,7 +1293,15 @@ async function handleChat(req, res, settings, surface, convNotes) {
               // 11140 账号级风控：默认停手（换号会加重设备连坐），见 accountBlockedStop 注释
               const blockedHold = accountBlockedStop(cls, settings, restrictedRotations, coolInfo && coolInfo.restrictedHold);
               humanizeAccountBlocked(lastErr, cls, blockedHold.hold);
-              if (blockedHold.stop || !cls.switchable) {
+              if (blockedHold.stop) {
+                // ⚠ 只跳出**当前渠道**，不设 fatalErr：换渠道是安全的（不同渠道 = 不同账号体系/不同
+                // 上游域，109 号连坐是按设备+账号体系判定的），把它也掐掉会让用户在本可以换个渠道
+                // 继续用的情况下直接看到失败。与 11128 的处理同款：break 出账号循环，交给外层跳备选。
+                blockedHoldOut = true;
+                streamErr = null;
+                break;
+              }
+              if (!cls.switchable) {
                 fatalErr = lastErr;
                 streamErr = null;
                 break;
@@ -1407,7 +1418,12 @@ async function handleChat(req, res, settings, surface, convNotes) {
             // 11140 账号级风控：默认停手（换号会加重设备连坐），见下方 accountBlockedStop 注释
             const blockedHold = accountBlockedStop(cls, settings, restrictedRotations, coolInfo && coolInfo.restrictedHold);
             humanizeAccountBlocked(e, cls, blockedHold.hold);
-            if (blockedHold.stop || !cls.switchable) {
+            if (blockedHold.stop) {
+              // 只跳出当前渠道（不设 fatalErr）：换渠道安全，理由见流内路径同一处注释
+              blockedHoldOut = true;
+              break;
+            }
+            if (!cls.switchable) {
               fatalErr = e;
               break;
             }
@@ -1430,7 +1446,9 @@ async function handleChat(req, res, settings, surface, convNotes) {
           triedChannels.push({ chan, accounts: triedAccountNames });
           if (!degradedHere && realTries > 0 && lastErr) {
             const cls = classifyUpstream(lastErr, false, chan, targetModel, settings);
-            if (DEGRADABLE.has(cls.kind) && noteChannelFail(chan) >= 2) {
+            // 11140 已由 noteAccountRestricted 记入「连坐暂停」（比渠道降级更专用：到期自动恢复、
+            // 不参与渠道失败计数），这里不再给它叠加渠道降级，否则两层窗口互相延长
+            if (DEGRADABLE.has(cls.kind) && cls.kind !== "account_blocked" && noteChannelFail(chan) >= 2) {
               degradeChannel(chan, String(lastErr.message || cls.kind).slice(0, 120), settings);
             }
           }
@@ -1537,6 +1555,11 @@ async function handleChat(req, res, settings, surface, convNotes) {
     // 不点明的话会被读成「用这个渠道发过请求」。判定用 upstreamTries 而不是轨迹里的账号名：
     // fatal（上游 400 透传）那条路径刻意不往轨迹里 push，用轨迹会误报「没发过请求」
     if (!allConcBlocked && !upstreamTries) msg = `未发起任何上游请求（候选渠道号池为空或降级中）：${msg}`;
+    // 本请求撞过 11140：把「为什么不换号了」讲清楚。用户最容易误解成「网关不会换号」而反复重试，
+    // 实际是刻意停手（同请求内连打是连坐放大器）。换渠道照常进行，失败原因仍按上面的轨迹逐条列出
+    if (blockedHoldOut && !/11140/.test(msg)) {
+      msg += "（本次已遇到 11140 账号级风控：已停止在该渠道继续换号，换渠道照常尝试；同请求内连打多个号会加重上游连坐）";
+    }
     // 6004 原话是「usage exceeds frequency limit」，账号积分其实还在；用户很容易读成
     // 「额度用完」去充值。补一句本机口径（不替代上游 reset 时间，只解释错误性质）
     if (/\b6004\b/.test(msg) && !msg.includes("6004 =")) {

@@ -218,6 +218,70 @@ async function main() {
     pool.clearRestrictedWave("workbuddy_ai");
   });
 
+  await T("T8 默认阈值=1：拦下一个号就整池暂停（不等第 2 个）", async () => {
+    // 这是 2026-11-11 的核心诉求：上游按设备/出口连带判定，等第 2 个号才停已经晚了
+    for (const id of [b1, b2, b3, good]) store.updateAccount(id, { status: "online", coolUntil: 0, coolReason: "" });
+    pool.clearRestrictedWave("workbuddy_ai");
+    // 用内置默认值（不传 wbRestrictedWaveMin），验证真实默认就是 1
+    const wave = pool.noteAccountRestricted("workbuddy_ai", {});
+    assert(wave.min === 1, "默认阈值必须是 1（拦一个就停）: " + wave.min);
+    assert(wave.hold === true && wave.count === 1, "拦下第 1 个号就该触发暂停: " + JSON.stringify(wave));
+    assert(pool.channelRestricted("workbuddy_ai"), "暂停状态应可查询");
+    pool.clearRestrictedWave("workbuddy_ai");
+  });
+
+  await T("T9 暂停只掐本渠道：同一模型的其它渠道照常接住（换渠道安全，不被 11140 连坐）", async () => {
+    // glm-5.3 同时被 workbuddy_ai 与 trae 承载（见 rules/catalog.json），用它做真实双渠道验证：
+    // workbuddy_ai 被 11140 暂停后，请求应跳到 trae 成功——证明「停手」只作用于本渠道
+    const traeHits = { n: 0 };
+    const traeSrv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        traeHits.n++;
+        // trae 的事件形态与 OpenAI 不同：它把正文放在 data 帧的 message 字段里（不是
+        // choices[0].delta.content）。按 OpenAI 形态回会被判「空响应」——这正是本用例
+        // 第一次跑出来的现象，也说明网关确实把请求发到了 trae。
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        // trae 的事件形态：{event:"output", response:"..."} → {event:"token_usage"} → {event:"done"}
+        res.write('data: {"event":"output","response":"from-trae"}\n\n');
+        res.write('data: {"event":"token_usage","prompt_tokens":3,"completion_tokens":2,"total_tokens":5}\n\n');
+        res.write('data: {"event":"done","finish_reason":"stop"}\n\n');
+        res.end();
+      });
+    });
+    await new Promise((r) => traeSrv.listen(0, "127.0.0.1", r));
+    const traePort = traeSrv.address().port;
+    const cfg2 = JSON.parse(fs.readFileSync(headersPath, "utf8"));
+    cfg2.trae.chatUrl = `http://127.0.0.1:${traePort}/trae/chat`;
+    fs.writeFileSync(headersPath, JSON.stringify(cfg2, null, 2));
+    rules.reload("headers.json");
+    store.addAccount({ channel: "trae", uid: "tr1", name: "trae号", token: "trae-token", source: "paste", expiresAt: Date.now() + 7200000 });
+    // workbuddy_ai 侧留一个可用号（会被暂停挡住，不该被打）
+    for (const id of [b2, b3]) store.updateAccount(id, { status: "disabled" });
+    store.updateAccount(good, { status: "disabled" });
+    store.updateAccount(b1, { status: "online", coolUntil: 0, coolReason: "" });
+    // 手动把 workbuddy_ai 置为暂停，模拟「刚被拦下一个号」
+    pool.clearRestrictedWave("workbuddy_ai");
+    assert(pool.noteAccountRestricted("workbuddy_ai", {}).hold, "workbuddy_ai 应已暂停");
+    cfg.channelFailover = true;
+    cfg.channelFailoverMax = 5;
+    const wbBefore = hits.blocked;
+    const r = await fetch(base + "/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + k.secret },
+      body: JSON.stringify({ model: "glm-5.3", stream: false, messages: [{ role: "user", content: "hi" }] }),
+    });
+    const txt = await r.text();
+    assert(hits.blocked === wbBefore, "暂停期内被暂停渠道零上游请求: " + JSON.stringify(hits));
+    assert(traeHits.n >= 1, "应跳到 trae（其它渠道不被连坐）: " + traeHits.n);
+    assert(r.status === 200 && /from-trae/.test(txt), "请求应由 trae 接住: " + r.status + " " + txt.slice(0, 200));
+    cfg.channelFailover = false;
+    cfg.channelFailoverMax = 3;
+    pool.clearRestrictedWave("workbuddy_ai");
+    await new Promise((r) => traeSrv.close(r));
+  });
+
   await server.stopAsync();
   await new Promise((r) => fake.close(r));
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -515,8 +515,13 @@ Relative paths resolve from the workspace root; absolute paths identify files or
 | --- | --- | --- |
 | `proxy.wbRestrictedRotateMax` | `0` | 单请求内因 11140 允许换号的次数。**0 = 停手**（新默认） |
 | `proxy.wbRestrictedWaveWindowMs` | `900000` | 「一波」时间窗（15 分钟） |
-| `proxy.wbRestrictedWaveMin` | `2` | 窗口内被拦账号数达此值 → 整池暂停 |
+| `proxy.wbRestrictedWaveMin` | `1` | 窗口内被拦账号数达此值 → 整池暂停。**1 = 拦下一个号就全渠道停发** |
 | `proxy.wbRestrictedHoldMs` | `1800000` | 整池暂停时长（30 分钟）；`0` = 关闭暂停 |
+
+**「停手」的边界（重要，别改错）**：停手只作用于**当前渠道**——跳出该渠道的账号循环，
+继续走备选渠道。换渠道是安全的：不同渠道 = 不同上游域/账号体系，11140 的连坐按
+「设备 + 账号体系」判定，不会跨渠道传染。把停手实现成 `fatalErr` 会连带掐掉换渠道，
+让用户在本可以换个渠道继续用的情况下直接看到失败——这点与 11128 的处理同款（`break` 而非 `fail`）。
 
 代码落点：
 
@@ -531,7 +536,8 @@ Relative paths resolve from the workspace root; absolute paths identify files or
 新版默认停手，客户端会收到一条明确的 403。这是刻意的——同请求内连打正是连坐的放大器。
 需要旧行为时把 `wbRestrictedRotateMax` 调大。
 
-自测：`tools/proxy-wb-restricted-selftest.cjs`（7 项：停手/配额/暂停/零请求/恢复/开关/文案）。
+自测：`tools/proxy-wb-restricted-selftest.cjs`（9 项：停手 / 配额 / 一票暂停 / 零请求 /
+恢复 / 开关 / 文案 / 默认阈值=1 / 换渠道不被误伤）。
 
 ### 版本三件套：别把版本号写进测试，也别靠人肉记
 

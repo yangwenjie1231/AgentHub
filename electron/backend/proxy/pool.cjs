@@ -367,11 +367,14 @@ function coolAccountMs(id, untilMs, detail) {
 //   · 它带**设备连带**性质：同一台机器在短时间内连续把多个号打到 11140，会显著加重连坐
 //     （workbuddy2api-hub #422 用户实测「一个任务里 7 个号全被封」——正是"被拦之后立刻换号继续打"）；
 //   · 重新登录 / 申诉工单 / 注销重注册**都解不开**（#659 实测），只有上游限制窗口自然到期。
-// 所以正确反应是**停手**：单个请求内不再换号试探（策略见 server.cjs 的 accountBlockedPolicy），
-// 且同一渠道在一个窗口内被拦的账号数达到阈值时，整渠道暂停派发一段时间——期间一个上游请求都不发。
-// 内存态：账号本身的冷却已随 coolAccountIn 落库（cool_until），重启后这些号照样选不中；
+// 所以正确反应是**停手**：单个请求内不再换号试探（策略见 server.cjs 的 accountBlockedStop），
+// 且**该渠道被拦下第一个账号就整渠道暂停派发**——期间一个上游请求都不发。
+// ⚠ 阈值默认 1（2026-11-11 定）：上游这一波是按「设备/出口」连带判定的，等到第 2 个号才停
+// 已经迟了——第一个号被拦就是「这台机器已经被盯上」的信号，继续派发只会把其余好号一起带走。
+// 代价是单渠道池会整段不可用（默认 30 分钟），这是刻意的：宁可暂停，不要批量封号。
+// 内存态：账号本身的冷却已随 coolAccount 落库（cool_until），重启后这些号照样选不中；
 // 这里记的只是「这一波」的聚合节奏，丢了最多让重启后多撞一次，不会把坏号误放回池。
-const RESTRICTED_WAVE_DEF = { windowMs: 15 * 60000, min: 2, holdMs: 30 * 60000 };
+const RESTRICTED_WAVE_DEF = { windowMs: 15 * 60000, min: 1, holdMs: 30 * 60000 };
 const restrictedWaves = new Map(); // channel → { hits: number[], holdUntil: number, count: number }
 
 /** 记一次「账号被 11140 拦」并判定是否触发整池暂停。
