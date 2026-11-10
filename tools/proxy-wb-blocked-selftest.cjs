@@ -252,6 +252,22 @@ async function main() {
     assert(!fs.existsSync(authDir), "登录文件目录不该被创建: " + authDir);
   });
 
+  await T("T10 已知被限（restricted）的号切号时**零上游请求**（探活会续期限制窗口）", async () => {
+    // 背景：对已被限制的账号反复发探活请求，正是续期限制窗口、加重设备连坐的动作
+    // （proxy 侧已为此禁掉"同请求内换号连打"）。状态已知就用状态，别再问上游。
+    store.updateAccount(blockedId, { status: "restricted", coolUntil: Date.now() + 3600000, coolReason: "账号被上游风控拦截" });
+    const before = hits.blocked + hits.good;
+    const r = await ideswitch.switchIdeAccount(blockedId, { confirmAck: true });
+    assert(r.ok === false, "restricted 号切号必须被拦下: " + JSON.stringify(r).slice(0, 160));
+    assert(hits.blocked + hits.good === before, "不得向上游发任何请求: " + JSON.stringify(hits));
+    assert(/风控|限制/.test(r.message) && /11140/.test(r.message), "拦下理由要点明 11140: " + r.message);
+    assert(/未改动任何文件/.test(r.message), "必须如实说明没动文件: " + r.message);
+    assert(/未向上游发任何请求/.test(r.message), "文案应说明没打上游: " + r.message);
+    assert(/申诉/.test(r.message), "文案应指向申诉（唯一有效通道）: " + r.message);
+    assert(!/只能等/.test(r.message), "不得再说「只能等」（无证据支持）: " + r.message);
+    store.updateAccount(blockedId, { status: "online", coolUntil: 0, coolReason: "" });
+  });
+
   await server.stopAsync();
   await new Promise((r) => fake.close(r));
   console.log(`\n${pass} passed, ${fail} failed`);

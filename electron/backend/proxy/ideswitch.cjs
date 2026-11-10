@@ -784,6 +784,23 @@ function switchWorkbuddyAccount(acc, opts) {
 
 /** 探活 + 正式写回（拆成两段只是为了让上面那道闸的意图读起来是顺序的） */
 async function wbProbeThenSwitch(acc, opts, secrets, file) {
+  // 闸⓪-2：**已知被限的号不再探活**。
+  //   池里状态已是 restricted，说明本机已经确知它被 11140 限制；此时再发一次探活请求，
+  //   等于拿这个号去打上游一次——而对被限账号反复试探正是续期限制窗口、加重设备连坐的动作
+  //   （proxy 侧已为此禁掉"同请求内换号连打"）。状态已知就用状态，别再问上游。
+  //   ⚠ 只有 restricted 走这条短路；其它状态（含 online）仍然探活，用来发现
+  //   「本地看着正常、其实已被限」的号——那才是探活的价值。
+  if (String(acc.status || "") === "restricted") {
+    return {
+      ok: false,
+      channel: acc.channel,
+      message:
+        `该账号已被上游风控限制（403 request illegal / code 11140），本地已标记为「上游限制中」：` +
+        `切到本地客户端后同样用不了，已中止切换（未改动任何文件，也未向上游发任何请求）。` +
+        `请改用其它账号。要恢复这个账号，请走号池行的「申诉」（材料已带 requestId），` +
+        `或在你确认它已经能用后点「解除限制」。`,
+    };
+  }
   const adapter = adapters.get(acc.channel);
   if (adapter && typeof adapter.probeChat === "function") {
     const probe = await adapter
@@ -794,10 +811,10 @@ async function wbProbeThenSwitch(acc, opts, secrets, file) {
         ok: false,
         channel: acc.channel,
         message:
-          `该账号已被上游风控拦截（403 request illegal / code 11140）：模型调用被上游整体拒绝，` +
+          `该账号已被上游风控限制（403 request illegal / code 11140）：模型调用被上游整体拒绝，` +
           `与提问内容无关。切到本地客户端后同样用不了，已中止切换（未改动任何文件）。` +
-          `请改用其它账号。注意：重新登录 / 申诉工单都解不开这个限制（社区 2026-10 实测），` +
-          `只能等上游的限制窗口自然到期。`,
+          `请改用其它账号。要恢复这个账号，请走号池行的「申诉」（材料已带 requestId）；` +
+          `重新登录 / 注销重注册都解不开（社区三方实测）。`,
       };
     }
   }
