@@ -1692,11 +1692,19 @@ function makeWorkBuddy(channelId) {
       try {
         await this.chat({ account, secrets, model, body, meta: {}, emit: (ev) => { if (ev && ev.type === "error") streamErr = ev; } });
       } catch (e) {
-        if (isWbAccountBlocked(e)) return { ok: false, blocked: true, message: String((e && e.message) || e) };
+        if (isWbAccountBlocked(e)) {
+          // raw 必须带回去：探活是「切号前」的最后一道闸，也是**很多账号第一次暴露被限的地方**
+          // （号池里状态还是 online，一探才知道已被限）。若这里不把上游原文交出去，事后
+          // 申诉就少了 requestId —— 那种材料基本没用（2026-11-11 实测踩过：
+          // izhuangfangyi 就是切号探活时被发现的，当时没留原文）。
+          return { ok: false, blocked: true, message: String((e && e.message) || e), raw: String((e && (e.body || e.message)) || "") };
+        }
         return { ok: false, inconclusive: true, message: String((e && e.message) || e) };
       }
       // 流内 error 事件（非 2xx 之外的业务拒绝）同样要认
-      if (streamErr && isWbAccountBlocked(streamErr)) return { ok: false, blocked: true, message: String(streamErr.message || "") };
+      if (streamErr && isWbAccountBlocked(streamErr)) {
+        return { ok: false, blocked: true, message: String(streamErr.message || ""), raw: String(streamErr.message || "") };
+      }
       return { ok: true };
     },
 

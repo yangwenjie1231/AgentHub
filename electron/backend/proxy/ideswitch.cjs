@@ -39,6 +39,7 @@ const store = require("./store.cjs");
 const discovery = require("./discovery.cjs");
 const util = require("./util.cjs");
 const adapters = require("./adapters.cjs");
+const oplog = require("./oplog.cjs");
 const raccoonAuth = require("./raccoonAuth.cjs");
 const raccoonClient = require("./raccoonClient.cjs");
 const zcodeSwitch = require("./zcodeSwitch.cjs");
@@ -807,14 +808,33 @@ async function wbProbeThenSwitch(acc, opts, secrets, file) {
       .probeChat(acc, secrets)
       .catch((e) => ({ ok: false, inconclusive: true, message: String((e && e.message) || e) }));
     if (probe && probe.blocked) {
+      // 探活发现被限 = 这个账号**第一次暴露**被 11140 限制（号池里状态还可能是 online）。
+      // 两件事必须落库，否则这条线索就浪费了：
+      //   ① 状态标 restricted —— 否则它下次还会被选中、再撞一次，界面也看不出它被封；
+      //   ② 原文落 meta.lastError.raw —— 申诉要 requestId，而 requestId 只在原文里。
+      // 顺手记一条 op_log，号池页的历史里能查到「什么时候、被哪个号探出来的」。
+      try {
+        store.updateAccount(acc.id, {
+          status: "restricted",
+          coolUntil: Date.now() + 2 * 3600000,
+          coolReason: "账号被上游风控限制（切换账号时的探活发现）",
+        });
+        store.noteError(acc.id, "账号被上游风控限制（切换账号时的探活发现，不是切换功能故障）", { raw: String(probe.raw || probe.message || "") });
+        oplog.log("error", "切换账号", `探活发现账号被上游限制（11140），已标记为「上游限制中」：${acc.name || acc.uid || acc.id}`, {
+          channel: acc.channel,
+          target: acc.name,
+          detail: String(probe.raw || "").slice(0, 400),
+        });
+      } catch { /* 落库失败不影响拦截结果 */ }
       return {
         ok: false,
         channel: acc.channel,
         message:
           `该账号已被上游风控限制（403 request illegal / code 11140）：模型调用被上游整体拒绝，` +
           `与提问内容无关。切到本地客户端后同样用不了，已中止切换（未改动任何文件）。` +
-          `请改用其它账号。要恢复这个账号，请走号池行的「申诉」（材料已带 requestId）；` +
-          `重新登录 / 注销重注册都解不开（社区三方实测）。`,
+          `已把该账号标记为「上游限制中」并留档上游原始报文——` +
+          `请改用其它账号；要恢复它，请走号池行的「申诉」（材料已带 requestId），` +
+          `或在你确认它已经能用后点「解除限制」。`,
       };
     }
   }

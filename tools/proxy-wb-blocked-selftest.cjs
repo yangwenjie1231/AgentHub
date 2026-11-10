@@ -268,6 +268,25 @@ async function main() {
     store.updateAccount(blockedId, { status: "online", coolUntil: 0, coolReason: "" });
   });
 
+  await T("T11 探活发现被限 → 必须落 restricted + 留档原文（申诉要 requestId）", async () => {
+    // 现场：号池里状态还是 online，切号探活时才发现已被 11140 限制（2026-11-10 izhuangfangyi
+    // 就是这么暴露的）。那时没落库、也没留原文，等于把唯一一次「拿到 requestId 的机会」丢了。
+    const freshId = store.addAccount({
+      channel: "workbuddy_ai", uid: "fw-probe-discover", name: "探活发现号",
+      token: "blocked-token", source: "paste", expiresAt: Date.now() + 3600000,
+    });
+    assert(store.getAccount(freshId).status === "online", "前置：新号应为 online");
+    const r = await ideswitch.switchIdeAccount(freshId, { confirmAck: true });
+    assert(r.ok === false, "应被拦下: " + JSON.stringify(r).slice(0, 140));
+    assert(/未改动任何文件/.test(r.message), "必须说明没动文件: " + r.message);
+    const acc = store.getAccount(freshId);
+    assert(acc.status === "restricted", "必须标记为 restricted（否则下次还会被选中再撞）: " + acc.status);
+    const meta = (() => { try { return JSON.parse(acc.meta || "{}") || {}; } catch { return {}; } })();
+    assert(meta.lastError && meta.lastError.raw, "必须留档上游原文: " + JSON.stringify(meta.lastError || {}));
+    assert(/11140/.test(meta.lastError.raw), "原文里应含 11140: " + String(meta.lastError.raw).slice(0, 120));
+    store.removeAccount(freshId);
+  });
+
   await server.stopAsync();
   await new Promise((r) => fake.close(r));
   console.log(`\n${pass} passed, ${fail} failed`);
