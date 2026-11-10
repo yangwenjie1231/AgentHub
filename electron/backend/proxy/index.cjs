@@ -1211,11 +1211,22 @@ function register(ipcMain) {
     }, { openAuthWindow }, { captchaVerifyParam, vendor });
     // 带授权地址的渠道在系统浏览器打开（小浣熊走内嵌授权窗，不回 url——深链回调绝不能进浏览器
     // 再被系统交给官方客户端：授权码是一次性的，官方客户端消费掉 AgentHub 就永远收不到回调）
-    if (r.ok && r.url) await platform.openExternal(r.url);
+    // 无痕/独立配置打开（proxy.oauthIncognito，默认开）：浏览器 cookie 按站点共享，多号登录时
+    // 第二个号会直接以第一个号的身份进去，拿到的授权码属于错账号。无痕每次新配置目录才能真正多号。
+    let openInfo = null;
+    if (r.ok && r.url) {
+      openInfo = await platform
+        .openExternal(r.url, { incognito: settings().oauthIncognito !== false })
+        .catch((e) => ({ ok: false, message: String((e && e.message) || e) }));
+      // 无痕没成功（没装 Edge/Chrome 等）必须让用户知道：否则他会以为这次是隔离的
+      if (openInfo && openInfo.ok === false && openInfo.message) {
+        oplog.log("warn", "OAuth 登录", openInfo.message, { channel: ch });
+      }
+    }
     // port 一并回传：AutoClaw 国际版回环登录会占用 z.ai 登记的白名单端口，前端展示/排障需要它；
     // userCode 一并回传：Cline 设备授权要显示「用户码」供手动输码（verification_uri_complete
     // 已带码，但用户改用普通授权页时仍需要这串码）
-    return r.ok ? ok({ url: r.url, mode: r.mode, port: r.port, userCode: r.userCode }) : fail(r.message);
+    return r.ok ? ok({ url: r.url, mode: r.mode, port: r.port, userCode: r.userCode, incognito: openInfo ? !!openInfo.ok : null, browser: openInfo && openInfo.browser, openMessage: openInfo && openInfo.message }) : fail(r.message);
   }));
   ipcMain.handle("proxy_oauth_cancel", handle(() => ok({ cancelled: discovery.cancelOAuth() })));
   // ===== AutoClaw 登录辅助：国内版手机验证码两跳 + 国际版风控配置（验证码由前端跑 SDK）=====

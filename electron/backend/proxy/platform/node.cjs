@@ -69,6 +69,6 @@ module.exports = {
   log,
 
   // 无图形环境：打开外链/目录的调用点均为桌面 IPC，容器形态不可达，安静忽略
-  openExternal() { return Promise.resolve(); },
+  openExternal() { return Promise.resolve({ ok: false, message: "headless 形态不打开浏览器" }); },
   openPath() { return Promise.resolve(); },
 };

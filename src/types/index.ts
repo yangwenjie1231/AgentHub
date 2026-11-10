@@ -330,6 +330,8 @@ export interface ProxyConfig {
   modelOverrides: Record<string, string>;
   /** 拟人抖动：每次上游请求前随机停 40~220ms，模拟真实客户端节奏 */
   humanizeJitter: boolean;
+  /** 登录授权页用无痕/独立配置的浏览器打开（多号隔离；缺省视为开启） */
+  oauthIncognito?: boolean;
   /** 禁用的模型（请求直接 400） */
   disabledModels: string[];
   /** 模型 → 回退模型（未知模型/号池耗尽时自动切换，单跳；旧版 per-model 配置，优先于全局回退） */

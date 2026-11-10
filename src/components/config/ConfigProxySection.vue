@@ -256,6 +256,13 @@ function openDataDir() {
         </div>
         <div class="set-row">
           <div class="set-info">
+            <div class="set-name">登录用无痕浏览器（多号隔离）</div>
+            <div class="set-desc">打开 OAuth 登录页时用独立的无痕会话（优先 Edge <code>--inprivate</code>，其次 Chrome），每次新建独立配置目录。浏览器 cookie 按站点共享，不隔离的话登录第二个号会直接以第一个号的身份进去、拿到的授权码属于错账号。找不到 Edge/Chrome 时退回默认浏览器并提示。</div>
+          </div>
+          <button class="switch" :class="{ on: app.config.proxy.oauthIncognito !== false }" @click="app.config.proxy.oauthIncognito = app.config.proxy.oauthIncognito === false"></button>
+        </div>
+        <div class="set-row">
+          <div class="set-info">
             <div class="set-name">跨渠道故障转移</div>
             <div class="set-desc">渠道报 503/429 或号池耗尽时，请求内自动跳到其他渠道（按余额充足度排序），客户端无感；关闭后只在单渠道内换号</div>
           </div>

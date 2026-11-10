@@ -245,6 +245,12 @@ function defaultConfig() {
       debugStatus: false,       // /status 调试端点（默认关，仅回环地址）
       modelOverrides: {},       // 模型 → 渠道 的 per-model 覆盖（多源重叠时优先）
       humanizeJitter: true,     // 拟人抖动：每次上游请求前随机停 40~220ms（防风控识别为反代）
+      oauthIncognito: true,     // 登录授权页用**无痕/独立配置**的浏览器打开（默认开）。
+                                // 为什么默认开：浏览器 cookie 按站点共享，多号登录时第二个号会
+                                // 直接以第一个号的身份进去，拿到的授权码属于错账号。
+                                // 优先 Edge（--inprivate），其次 Chrome（--incognito），每次新建
+                                // 独立 --user-data-dir；都找不到时退回默认浏览器并**明确告知**。
+                                // 可用环境变量 AGENTHUB_INCOGNITO_BROWSER 指定浏览器可执行文件路径
       disabledModels: [],       // 禁用的模型（请求直接 400 model_disabled，且不出现在 /v1/models）
       modelFallback: {},        // 模型 → 回退模型（旧版 per-model 配置，优先于全局回退）
       modelAliases: {},         // 自定义模型映射：别名 → 目标模型 id（请求入口先解析再路由）
