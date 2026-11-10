@@ -228,6 +228,24 @@ console.log("11b. DSH @ 路径说明指纹（rc.5+ / <=rc.2 双措辞）");
   // from === to 的规则等于没写——本次踩过的坑，加回归断言
   const noop = d.CLIENT_FINGERPRINTS.filter((f) => f.from === f.to).map((f) => f.id);
   ok("没有 from===to 的空规则", noop.length === 0, noop.join(","));
+
+  // ===== 11b-2. 「未收录指纹」的行为约定（靠补表策略的护栏）=====
+  // 维护者明确选择「继续靠补表」，不做中性 system 重试（理由见 desensitize.cjs 顶部注释）。
+  // 这条策略要成立，必须保证两件事，否则「漏网」会静默变成「数据被改坏」或「无法定位」：
+  //   ① 未命中任何规则时，正文**逐字节不变**（绝不因为「像指纹」就乱改用户内容）；
+  //   ② 未命中时 listFingerprintHits 返回空 —— 这是排障入口：它空着才说明是「新指纹」，
+  //      不为空则说明该去检查规则顺序/规则是否失效。
+  const UNKNOWN_FP = "You are Codex, a terminal-based coding assistant made by ExampleCorp.";
+  const unknownOut = d.desensitizeTemplateText(UNKNOWN_FP, { role: "system" });
+  ok("未收录指纹：正文逐字节不变（不乱改）", unknownOut === UNKNOWN_FP, unknownOut);
+  ok("未收录指纹：listFingerprintHits 返回空（据此判断是新指纹）",
+    d.listFingerprintHits(UNKNOWN_FP).length === 0, d.listFingerprintHits(UNKNOWN_FP).join(","));
+  // 反向：已收录的必须**能**被 listFingerprintHits 认出来，否则排障时会误判成「新指纹」而重复补表
+  for (const fp of d.CLIENT_FINGERPRINTS) {
+    if (!fp.from || !fp.from.includes(" ")) continue; // 单词级品牌名不参与本断言
+    ok("已收录指纹可被 listFingerprintHits 定位：" + fp.id,
+      d.listFingerprintHits(fp.from).includes(fp.id), d.listFingerprintHits(fp.from).join(","));
+  }
 }
 
 // ===== 11c. 零宽字符：默认不再注入 + 可剥离 =====
