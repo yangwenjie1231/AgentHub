@@ -144,6 +144,11 @@ const ALLOWED_COMMANDS = new Set([
   "proxy_account_rename",
   "proxy_account_note",
   "proxy_account_cool_off",
+  // 11140 申诉材料：组装（本地）/ 邮件草稿（mailto）/ 官方支持页。
+  // 三个都只读账号数据，不代用户发送任何东西
+  "proxy_account_appeal",
+  "proxy_account_appeal_mailto",
+  "proxy_account_appeal_help",
   "proxy_account_refresh",
   "proxy_credits_refresh",
   "proxy_credits_refresh_channel",

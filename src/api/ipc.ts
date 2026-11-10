@@ -334,6 +334,20 @@ export const proxyAccountNote = (id: string, note: string) =>
 /** 手动解除冷却：cooling 账号立即回 online，releasedModels = 同时豁免的模型级负缓存条数 */
 export const proxyAccountCoolOff = (id: string) =>
   call<{ ok: boolean; message?: string; releasedModels?: number }>("proxy_account_cool_off", { id });
+/** 11140 申诉材料：本地组装（收件人 / 主题 / 正文 / requestId），**不发送** */
+export const proxyAccountAppeal = (id: string) =>
+  call<{
+    ok: boolean; message?: string;
+    to?: string; subject?: string; body?: string;
+    code?: string; requestId?: string; hasRaw?: boolean;
+    channel?: string; accountName?: string;
+  }>("proxy_account_appeal", { id });
+/** 用系统邮件客户端起草申诉（mailto，只起草不发送；正文过长时自动退回精简版） */
+export const proxyAccountAppealMailto = (id: string) =>
+  call<{ ok: boolean; message?: string; truncated?: boolean }>("proxy_account_appeal_mailto", { id });
+/** 打开官方「联系我们」支持页（含账号恢复场景说明） */
+export const proxyAccountAppealHelp = () =>
+  call<{ ok: boolean; message?: string }>("proxy_account_appeal_help", {});
 // 单账号上游刷新：主进程 httpJson 60s 硬上限，超过 45s 默认看门狗，豁免
 export const proxyAccountRefresh = (id: string) =>
   call<{ ok?: boolean; id?: string; credits?: number; expiresAt?: number; message?: string }>("proxy_account_refresh", { id }, 0);

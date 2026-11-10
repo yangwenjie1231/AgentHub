@@ -1052,6 +1052,101 @@ function register(ipcMain) {
   }));
   ipcMain.handle("proxy_account_refresh", handle(({ id }) => credits.refreshAccount(id)));
   ipcMain.handle("proxy_credits_refresh", handle(() => credits.refreshAll()));
+  // ===== 11140 申诉材料（上游唯一承认的通道）=====
+  // 背景：11140 是账号级限制，重登/注销都无效（三方实测），官方只给 `SUBMIT_FEEDBACK`
+  // 与邮箱 workbuddy_ai@tencent.com（官方 Contact 页「账号恢复」场景）。申诉要带上
+  // requestId 才能被定位，而这个 id 只存在于上游原始报文里 —— 本机已把它留档在
+  // meta.lastError.raw（见 store.noteError 的 opts.raw），这里负责把它组装成一份
+  // 可直接粘进邮件/反馈框的材料。**不代用户发送**：发不发、怎么发由用户决定。
+  ipcMain.handle("proxy_account_appeal", handle(({ id } = {}) => {
+    const acc = store.getAccount(String(id || ""));
+    if (!acc) return fail("账号不存在");
+    const meta = (() => { try { return JSON.parse(acc.meta || "{}") || {}; } catch { return {}; } })();
+    const le = meta.lastError || {};
+    // 优先取带 archived 的留档（冷却结束后 lastError 会被清空，但 raw 仍保留）
+    const raw = String(le.raw || "");
+    let code = "";
+    let requestId = "";
+    try {
+      const j = JSON.parse(raw);
+      code = j.code != null ? String(j.code) : "";
+      requestId = String(j.requestId || "");
+    } catch { /* 非 JSON：退回正则兜底 */ }
+    if (!code) { const m = /\b(11140|11128)\b/.exec(raw); code = m ? m[1] : ""; }
+    if (!requestId) { const m = /"requestId"\s*:\s*"([^"]+)"/.exec(raw); requestId = m ? m[1] : ""; }
+    const channelLabel = acc.channel === "workbuddy_ai" ? "WorkBuddy AI（国际版）" : "WorkBuddy（国内版）";
+    const when = le.at ? new Date(le.at) : new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const stamp = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`;
+    const uid = String(acc.uid || "");
+    const subject = `【账号申诉】账号存在异常行为被限制（错误码 ${code || "11140"}）`;
+    const lines = [
+      "您好，",
+      "",
+      "我的 WorkBuddy 账号在使用中出现「账号存在异常行为，已被限制使用」的提示，所有模型调用被拒绝，",
+      "按提示提交反馈申请复核解封。以下为定位所需信息：",
+      "",
+      `· 错误码：${code || "(未记录)"}`,
+      `· Request ID：${requestId || "(未记录)"}`,
+      `· 发生时间：${stamp}`,
+      `· 账号 UID：${uid || "(未记录)"}`,
+      `· 产品线：${channelLabel}`,
+      "",
+      "上游返回的原始错误信息：",
+      raw || "(本机未留存原始报文)",
+      "",
+      "补充说明：我的账号此前使用正常，该限制与提问内容无关（更换请求内容仍返回同一错误），",
+      "且账号的登录状态、积分与目录接口均正常。请协助复核并解除限制，谢谢。",
+    ];
+    return ok({
+      to: "workbuddy_ai@tencent.com",
+      subject,
+      body: lines.join("\n"),
+      code,
+      requestId,
+      hasRaw: !!raw,
+      channel: acc.channel,
+      accountName: acc.name,
+    });
+  }));
+  // 用系统默认邮件客户端起草（不直接发送）：mailto 只做草稿，最终由用户点发送
+  ipcMain.handle("proxy_account_appeal_mailto", handle(async ({ id } = {}) => {
+    const acc = store.getAccount(String(id || ""));
+    if (!acc) return fail("账号不存在");
+    const meta = (() => { try { return JSON.parse(acc.meta || "{}") || {}; } catch { return {}; } })();
+    const raw = String((meta.lastError && meta.lastError.raw) || "");
+    let code = "", requestId = "";
+    try { const j = JSON.parse(raw); code = j.code != null ? String(j.code) : ""; requestId = String(j.requestId || ""); } catch { /* ignore */ }
+    if (!code) { const m = /\b(11140|11128)\b/.exec(raw); code = m ? m[1] : ""; }
+    if (!requestId) { const m = /"requestId"\s*:\s*"([^"]+)"/.exec(raw); requestId = m ? m[1] : ""; }
+    const subject = `【账号申诉】账号存在异常行为被限制（错误码 ${code || "11140"}）`;
+    const body = [
+      "您好，",
+      "",
+      "我的 WorkBuddy 账号提示「账号存在异常行为，已被限制使用」，模型调用被整体拒绝，申请复核解封。",
+      "",
+      `错误码：${code || "(未记录)"}`,
+      `Request ID：${requestId || "(未记录)"}`,
+      `账号 UID：${acc.uid || "(未记录)"}`,
+      "",
+      "上游原始错误信息：",
+      raw || "(本机未留存原始报文)",
+    ].join("\n");
+    // mailto 的长度上限各家客户端不一致（普遍 2000 字符左右会被截断），超长时按 RFC 只带
+    // 主题与邮箱，正文让用户在界面里复制——宁可多一步，也不发一封被截断的申诉
+    const mailto = (b) => `mailto:workbuddy_ai@tencent.com?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(b)}`;
+    const full = mailto(body);
+    const short = b => "您好，\n\n我的 WorkBuddy 账号提示「账号存在异常行为，已被限制使用」，申请复核解封。\n（详细材料请见应用内「申诉材料」窗口复制的内容）";
+    const target = full.length > 1800 ? mailto(short()) : full;
+    await platform.openExternal(target);
+    oplog.log("warn", "账号申诉", `已打开邮件草稿（${acc.name}，错误码 ${code || "?"}${requestId ? `，requestId ${requestId}` : ""}）`, { channel: acc.channel, target: acc.name });
+    return ok({ truncated: full.length > 1800 });
+  }));
+  // 申诉入口的官方支持页（应用内反馈框的操作路径写在标题里，避免用户找不到）
+  ipcMain.handle("proxy_account_appeal_help", handle(async () => {
+    await platform.openExternal("https://www.workbuddy.ai/docs/zh/workbuddy/Contact");
+    return ok({});
+  }));
   // 号池页右上角「刷新当前渠道」：只刷一个编译器的号池额度
   ipcMain.handle("proxy_credits_refresh_channel", handle(({ channel }) => {
     if (!channel) return fail("缺少渠道参数");

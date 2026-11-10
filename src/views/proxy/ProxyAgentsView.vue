@@ -1506,6 +1506,54 @@ async function copyErr() {
   }
 }
 
+// ===== 11140 申诉材料 =====
+// 上游只认「提交反馈」；这里把已留档的 requestId / 原始报文组装成可直接发送的材料。
+// 刻意不代发：材料给用户看，发不发、走邮件还是应用内反馈由他决定（自动代发等于替他
+// 向上游承认问题，而且失败时用户完全不知情）。
+type AppealPack = {
+  ok: boolean; message?: string;
+  to?: string; subject?: string; body?: string;
+  code?: string; requestId?: string; hasRaw?: boolean;
+  channel?: string; accountName?: string;
+};
+const appealRow = ref<(AppealPack & { id?: string }) | null>(null);
+const appealCopied = ref("");
+const appealBusy = ref(false);
+async function openAppeal(acc: ProxyAccount) {
+  if (appealBusy.value) return;
+  appealBusy.value = true;
+  try {
+    const r = await api.proxyAccountAppeal(acc.id);
+    if (!r || r.ok === false) { toast(r?.message || "生成申诉材料失败", "err"); return; }
+    appealRow.value = { ...r, accountName: r.accountName || acc.name, id: acc.id };
+  } catch (e) {
+    toast(String((e as Error)?.message || e), "err");
+  } finally {
+    appealBusy.value = false;
+  }
+}
+async function copyAppealPart(text: string, part: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    appealCopied.value = part;
+    setTimeout(() => { if (appealCopied.value === part) appealCopied.value = ""; }, 1600);
+  } catch {
+    toast("复制失败，请手动选择复制", "err");
+  }
+}
+async function draftAppealMail() {
+  const id = appealRow.value?.id;
+  if (!id) return;
+  const r = await api.proxyAccountAppealMailto(id);
+  if (r && r.ok === false) toast(r.message || "打开邮件客户端失败", "err");
+  else if (r && r.truncated) toast("正文较长，已改用精简版起草，完整材料请复制正文", "err");
+  else toast("已打开邮件草稿（不会自动发送）");
+}
+async function openAppealHelp() {
+  const r = await api.proxyAccountAppealHelp();
+  if (r && r.ok === false) toast(r.message || "打开支持页失败", "err");
+}
+
 // ===== 事件订阅与生命周期 =====
 
 // 事件合流：批量签到/额度刷新时主进程逐账号广播 credits 事件，逐条全量 refresh 会打满 IPC
@@ -1918,6 +1966,15 @@ onUnmounted(() => {
                         @click="releaseCool(acc)"
                       >
                         {{ coolOffId === acc.id ? "解除中…" : acc.status === "restricted" ? "解除限制" : "解冷却" }}
+                      </button>
+                    </el-tooltip>
+                    <el-tooltip
+                      v-if="acc.status === 'restricted'"
+                      content="上游 11140 只认「提交反馈」。点这里生成带错误码与 Request ID 的申诉材料（不会自动发送）"
+                      placement="top"
+                    >
+                      <button class="btn-link btn-sm" :disabled="appealBusy" @click="openAppeal(acc)">
+                        申诉
                       </button>
                     </el-tooltip>
                     <el-tooltip
@@ -2529,6 +2586,48 @@ onUnmounted(() => {
               {{ solvingCaptchaId === errRow.id ? "正在打开验证窗…" : "立即过码" }}
             </button>
             <button class="btn btn-primary" :disabled="!errRow.lastError" @click="copyErr">{{ errCopied ? "已复制" : "复制错误" }}</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 11140 申诉材料：本地组装好收件人/主题/正文，用户自己决定发给谁、发不发 -->
+      <div v-if="appealRow" class="p-mask" @click.self="appealRow = null">
+        <div class="p-dlg glass appeal-dlg">
+          <div class="p-title err-head">
+            <i class="ph ph-lifebuoy"></i>
+            账号申诉材料
+            <span class="err-time mono">{{ appealRow.accountName || "" }}</span>
+          </div>
+          <div class="appeal-tip">
+            上游 11140 只认「提交反馈」这一条通道（重登 / 注销 / 改提问都无效）。
+            下面这份材料已带上定位所需的 <b>错误码</b> 与 <b>Request ID</b>，可直接复制发送。
+            <span v-if="!appealRow.hasRaw" class="appeal-warn">
+              本机没有留存该账号的原始报文（旧版本未记录），Request ID 可能为空；仍可提交，上游按 UID 也能查。
+            </span>
+          </div>
+          <div class="appeal-field">
+            <label>收件人</label>
+            <div class="appeal-line">
+              <span class="mono">{{ appealRow.to }}</span>
+              <button class="btn-link btn-sm" @click="copyAppealPart(appealRow.to || '', 'to')">复制</button>
+            </div>
+          </div>
+          <div class="appeal-field">
+            <label>主题</label>
+            <div class="appeal-line">
+              <span class="mono">{{ appealRow.subject }}</span>
+              <button class="btn-link btn-sm" @click="copyAppealPart(appealRow.subject || '', 'subject')">复制</button>
+            </div>
+          </div>
+          <div class="appeal-field">
+            <label>正文</label>
+            <textarea class="appeal-body mono" readonly :value="appealRow.body"></textarea>
+          </div>
+          <div class="p-actions">
+            <button class="btn" @click="appealRow = null">关闭</button>
+            <button class="btn" @click="openAppealHelp">官方支持页</button>
+            <button class="btn" @click="copyAppealPart(appealRow.body || '', 'body')">{{ appealCopied === "body" ? "已复制正文" : "复制正文" }}</button>
+            <button class="btn btn-primary" @click="draftAppealMail">用邮件客户端起草</button>
           </div>
         </div>
       </div>
@@ -3795,6 +3894,66 @@ onUnmounted(() => {
   background: var(--danger-dim);
   color: var(--danger);
   border: 1px solid transparent;
+}
+/* ===== 11140 申诉材料弹窗：字段可逐项复制，正文可整段复制 ===== */
+.appeal-dlg {
+  width: 560px;
+  max-width: calc(100vw - 48px);
+}
+.appeal-tip {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-soft);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+.appeal-warn {
+  display: block;
+  margin-top: 6px;
+  color: var(--warn, #e5b454);
+}
+.appeal-field {
+  margin-top: 11px;
+}
+.appeal-field > label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.appeal-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-soft);
+  font-size: 11px;
+  color: var(--text-2);
+  word-break: break-all;
+  user-select: text;
+}
+.appeal-line > span {
+  flex: 1;
+  min-width: 0;
+}
+.appeal-body {
+  width: 100%;
+  min-height: 210px;
+  max-height: 280px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-soft);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-2);
+  resize: vertical;
+  user-select: text;
 }
 .btn-captcha-warn {
   color: #f59e0b !important;
