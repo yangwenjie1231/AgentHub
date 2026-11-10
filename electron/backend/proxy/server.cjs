@@ -1107,13 +1107,16 @@ async function handleChat(req, res, settings, surface, convNotes) {
         }
         // 风控连坐暂停（11140 一波）：与降级同性质但原因不同，期间一个上游请求都不发。
         // 不罚号、不计渠道失败（这是上游的账号级限制，罚渠道会把「限制窗口到期就恢复」的
-        // 半开语义搞乱），只如实告诉调用方还要等多久
+        // 半开语义搞乱），只如实告诉调用方还要等多久。
+        // ⚠ 状态码用 503 而**不是** 429：429 会被客户端理解为「限流了，快重试」，
+        // 而暂停期内重试注定失败、还会把限制窗口续期。503 + 明确文案才是可执行的说法
         const chHold = pool.channelRestricted(chan);
         if (chHold) {
           if (!lastErr) {
+            const mins = Math.max(1, Math.ceil((chHold.until - Date.now()) / 60000));
             lastErr = Object.assign(
-              new Error(`渠道 ${chan} 因上游风控连坐暂停派发中（${Math.ceil((chHold.until - Date.now()) / 60000)} 分钟后自动恢复；期间不向上游发任何请求）`),
-              { status: 429 }
+              new Error(`渠道 ${chan} 因上游风控（11140）连坐暂停派发中：${mins} 分钟后自动恢复，期间不向上游发任何请求（现在重试不会更快恢复）`),
+              { status: 503 }
             );
           }
           triedChannels.push({ chan, accounts: [], note: "风控连坐暂停" });
